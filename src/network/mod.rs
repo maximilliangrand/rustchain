@@ -18,6 +18,12 @@ use crate::core::{Block, Blockchain, Transaction};
 /// Default P2P port
 pub const DEFAULT_PORT: u16 = 8333;
 
+/// Maximum message size (1MB) to prevent denial-of-service via oversized messages
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1MB
+
+/// Maximum number of transactions per block
+const MAX_TXS_PER_BLOCK: usize = 1000;
+
 /// Network message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -106,7 +112,33 @@ impl Node {
                 break;
             }
 
-            let message: Message = serde_json::from_slice(&buffer[..n])?;
+            // Check message size limit to prevent denial-of-service
+            if n > MAX_MESSAGE_SIZE {
+                log::warn!("Received message exceeding size limit ({} bytes), dropping", n);
+                continue;
+            }
+
+            let message: Message = match serde_json::from_slice(&buffer[..n]) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::warn!("Failed to deserialize message: {}", e);
+                    continue;
+                }
+            };
+
+            // Validate transaction count for blocks
+            match &message {
+                Message::NewBlock(block) if block.transactions.len() > MAX_TXS_PER_BLOCK => {
+                    log::warn!(
+                        "Block contains too many transactions ({} > {}), rejecting",
+                        block.transactions.len(),
+                        MAX_TXS_PER_BLOCK
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+
             let response = Self::handle_message(message, &blockchain, &peers).await;
 
             if let Some(resp) = response {

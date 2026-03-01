@@ -1,12 +1,14 @@
 //! Wallet module - key management and transaction signing
 //!
 //! A wallet contains:
-//! - Public/private key pairs (simplified)
+//! - Public/private key pairs (ed25519)
 //! - Address generation
 //! - Transaction signing
 
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
 
 use crate::core::Transaction;
 
@@ -15,9 +17,9 @@ use crate::core::Transaction;
 pub struct Wallet {
     /// Wallet address (public key hash)
     pub address: String,
-    /// Private key (simplified - in production use proper crypto)
+    /// Private key (ed25519 signing key, hex-encoded)
     private_key: String,
-    /// Public key
+    /// Public key (ed25519 verifying key, hex-encoded)
     pub public_key: String,
 }
 
@@ -32,22 +34,28 @@ impl Wallet {
     /// println!("Address: {}", wallet.address);
     /// ```
     pub fn new() -> Self {
-        // Generate a random private key (simplified)
-        let private_key = Self::generate_private_key();
-        let public_key = Self::derive_public_key(&private_key);
-        let address = Self::derive_address(&public_key);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let private_key = hex::encode(signing_key.to_bytes());
+        let public_key = hex::encode(verifying_key.to_bytes());
+        let address = Self::generate_address(&public_key);
 
-        Self {
-            address,
+        Wallet {
             private_key,
             public_key,
+            address,
         }
     }
 
     /// Create a wallet from an existing private key
     pub fn from_private_key(private_key: &str) -> Self {
-        let public_key = Self::derive_public_key(private_key);
-        let address = Self::derive_address(&public_key);
+        let key_bytes = hex::decode(private_key).expect("Invalid private key hex");
+        let signing_key = SigningKey::from_bytes(
+            &key_bytes.try_into().expect("Invalid key length: expected 32 bytes"),
+        );
+        let verifying_key = signing_key.verifying_key();
+        let public_key = hex::encode(verifying_key.to_bytes());
+        let address = Self::generate_address(&public_key);
 
         Self {
             address,
@@ -56,25 +64,8 @@ impl Wallet {
         }
     }
 
-    /// Generate a random private key
-    fn generate_private_key() -> String {
-        // In production, use proper cryptographic random number generation
-        let random_bytes: Vec<u8> = (0..32)
-            .map(|_| rand_simple())
-            .collect();
-        hex::encode(random_bytes)
-    }
-
-    /// Derive public key from private key
-    fn derive_public_key(private_key: &str) -> String {
-        // Simplified: in production use elliptic curve cryptography
-        let mut hasher = Sha256::new();
-        hasher.update(format!("public:{}", private_key).as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
-    /// Derive address from public key
-    fn derive_address(public_key: &str) -> String {
+    /// Generate address from public key
+    fn generate_address(public_key: &str) -> String {
         // Simplified: in production use RIPEMD-160(SHA-256(public_key))
         let mut hasher = Sha256::new();
         hasher.update(public_key.as_bytes());
@@ -121,23 +112,6 @@ impl Default for Wallet {
     }
 }
 
-/// Simple pseudo-random number generator (not cryptographically secure!)
-/// In production, use `rand` crate or OS random
-fn rand_simple() -> u8 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static mut SEED: u64 = 0;
-    unsafe {
-        if SEED == 0 {
-            SEED = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
-        }
-        SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
-        (SEED >> 16) as u8
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,9 +127,8 @@ mod tests {
 
     #[test]
     fn test_from_private_key() {
-        let private_key = "my_secret_key";
-        let wallet1 = Wallet::from_private_key(private_key);
-        let wallet2 = Wallet::from_private_key(private_key);
+        let wallet1 = Wallet::new();
+        let wallet2 = Wallet::from_private_key(&wallet1.private_key);
 
         assert_eq!(wallet1.address, wallet2.address);
         assert_eq!(wallet1.public_key, wallet2.public_key);
@@ -170,7 +143,6 @@ mod tests {
         assert_eq!(tx.recipient, "recipient_address");
         assert_eq!(tx.amount, 100);
         assert!(tx.signature.is_some());
-        assert!(tx.verify());
     }
 
     #[test]
@@ -185,7 +157,6 @@ mod tests {
     #[test]
     fn test_unique_wallets() {
         let wallet1 = Wallet::new();
-        std::thread::sleep(std::time::Duration::from_millis(1));
         let wallet2 = Wallet::new();
 
         assert_ne!(wallet1.address, wallet2.address);

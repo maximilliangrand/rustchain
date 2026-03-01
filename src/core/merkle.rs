@@ -1,9 +1,12 @@
 //! Merkle Tree implementation for transaction verification
 //!
 //! A Merkle tree is a binary tree where:
-//! - Leaf nodes contain hashes of individual transactions
-//! - Internal nodes contain hashes of their children concatenated
+//! - Leaf nodes contain hashes of individual transactions (prefixed with 0x00)
+//! - Internal nodes contain hashes of their children concatenated (prefixed with 0x01)
 //! - The root hash represents the entire set of transactions
+//!
+//! Domain separation (leaf vs internal node prefix) prevents second preimage attacks
+//! where an attacker could construct a leaf that looks like an internal node.
 //!
 //! This allows efficient verification that a transaction is included
 //! in a block without downloading all transactions (SPV - Simple Payment Verification)
@@ -45,14 +48,15 @@ impl MerkleTree {
     pub fn new(hashes: Vec<String>) -> Self {
         if hashes.is_empty() {
             return Self {
-                root: Self::hash_data("empty"),
+                root: Self::hash_leaf("empty"),
                 nodes: vec![],
                 leaf_count: 0,
             };
         }
 
         let leaf_count = hashes.len();
-        let mut nodes = hashes;
+        // Hash each leaf with domain separation prefix
+        let mut nodes: Vec<String> = hashes.iter().map(|h| Self::hash_leaf(h)).collect();
 
         // If odd number of nodes, duplicate the last one
         if nodes.len() % 2 == 1 {
@@ -67,8 +71,7 @@ impl MerkleTree {
             let mut next_level = Vec::new();
 
             for chunk in current_level.chunks(2) {
-                let combined = format!("{}{}", chunk[0], chunk.get(1).unwrap_or(&chunk[0]));
-                let parent_hash = Self::hash_data(&combined);
+                let parent_hash = Self::hash_node(&chunk[0], chunk.get(1).unwrap_or(&chunk[0]));
                 next_level.push(parent_hash.clone());
                 all_nodes.push(parent_hash);
             }
@@ -90,10 +93,20 @@ impl MerkleTree {
         }
     }
 
-    /// Hash data using SHA256
-    fn hash_data(data: &str) -> String {
+    /// Hash a leaf node with domain separation prefix 0x00
+    fn hash_leaf(data: &str) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"\x00");
         hasher.update(data.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Hash an internal node with domain separation prefix 0x01
+    fn hash_node(left: &str, right: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"\x01");
+        hasher.update(left.as_bytes());
+        hasher.update(right.as_bytes());
         hex::encode(hasher.finalize())
     }
 
@@ -170,15 +183,14 @@ impl MerkleTree {
     /// # Returns
     /// true if the proof is valid
     pub fn verify_proof(tx_hash: &str, proof: &[(String, bool)], root: &str) -> bool {
-        let mut current_hash = tx_hash.to_string();
+        let mut current_hash = Self::hash_leaf(tx_hash);
 
         for (sibling_hash, is_left) in proof {
-            let combined = if *is_left {
-                format!("{}{}", sibling_hash, current_hash)
+            if *is_left {
+                current_hash = Self::hash_node(sibling_hash, &current_hash);
             } else {
-                format!("{}{}", current_hash, sibling_hash)
-            };
-            current_hash = Self::hash_data(&combined);
+                current_hash = Self::hash_node(&current_hash, sibling_hash);
+            }
         }
 
         current_hash == root
@@ -247,5 +259,13 @@ mod tests {
         let tree2 = MerkleTree::new(vec!["a".to_string(), "c".to_string()]);
 
         assert_ne!(tree1.root, tree2.root);
+    }
+
+    #[test]
+    fn test_domain_separation() {
+        // A leaf hash and an internal node hash of the same data should differ
+        let leaf = MerkleTree::hash_leaf("test");
+        let node = MerkleTree::hash_node("test", "");
+        assert_ne!(leaf, node);
     }
 }

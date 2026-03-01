@@ -1,1 +1,5 @@
 /target
+
+# Wallet files (contain private keys)
+*.wallet.json
+wallet_*.json
