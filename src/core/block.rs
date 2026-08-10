@@ -142,7 +142,7 @@ impl Block {
             self.nonce += 1;
 
             // Log progress every million iterations
-            if iterations % 1_000_000 == 0 {
+            if iterations.is_multiple_of(1_000_000) {
                 log::debug!("Mining... {} iterations", iterations);
             }
         }
@@ -272,8 +272,17 @@ mod tests {
 
     #[test]
     fn test_verify_transactions() {
-        let mut tx = Transaction::new("alice".into(), "bob".into(), 100);
-        tx.sign("alice_key");
+        use crate::core::transaction::derive_address;
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        // The sender must be the address derived from the signing key, otherwise
+        // verification correctly refuses the transaction.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let mut tx = Transaction::new(derive_address(&public_key), "bob".into(), 100);
+        tx.sign(&hex::encode(signing_key.to_bytes()))
+            .expect("a freshly generated key must sign");
         let block = Block::new(1, vec![tx], "prev".to_string());
 
         assert!(block.verify_transactions());

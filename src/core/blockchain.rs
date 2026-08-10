@@ -423,6 +423,7 @@ impl Default for Blockchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::transaction::SignError;
 
     fn create_test_blockchain() -> Blockchain {
         Blockchain::with_difficulty(2) // Low difficulty for fast tests
@@ -452,15 +453,15 @@ mod tests {
             "bob".to_string(),
             100,
         );
-        tx.sign("genesis_private_key"); // Sign the transaction
+        // A malformed key is rejected as an error, not a panic.
+        assert_eq!(
+            tx.sign("genesis_private_key"),
+            Err(SignError::InvalidHex("Odd number of digits".to_string()))
+        );
+        assert!(tx.signature.is_none(), "a failed signing must not mutate the transaction");
 
-        // Note: with real ed25519, this will fail verification since
-        // "genesis_private_key" is not valid hex. Tests should use
-        // proper ed25519 keys in production test suites.
-        // For now, we test the rejection path.
-        let result = bc.add_transaction(tx);
-        // The transaction will fail signature verification with real crypto
-        assert!(result.is_ok() || result.is_err());
+        // An unsigned transaction is refused by the chain.
+        assert!(bc.add_transaction(tx).is_err());
     }
 
     #[test]

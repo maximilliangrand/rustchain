@@ -11,7 +11,31 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use uuid::Uuid;
+
+/// Derive the canonical address for a hex-encoded ed25519 public key.
+///
+/// This is the single definition of the address format; [`crate::wallet::Wallet`]
+/// delegates to it so an address can never be derived two different ways.
+pub fn derive_address(public_key_hex: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(public_key_hex.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    format!("0x{}", &hash[..40])
+}
+
+/// Errors that can occur while signing a transaction.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SignError {
+    /// The private key was not valid hexadecimal.
+    #[error("private key is not valid hex: {0}")]
+    InvalidHex(String),
+
+    /// The private key decoded, but was not the 32 bytes ed25519 requires.
+    #[error("private key must be 32 bytes, got {0}")]
+    InvalidLength(usize),
+}
 
 /// Represents a transaction on the blockchain
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +52,12 @@ pub struct Transaction {
     pub timestamp: DateTime<Utc>,
     /// Transaction signature (ed25519 signature, hex-encoded)
     pub signature: Option<String>,
+    /// Hex-encoded ed25519 public key of the signer.
+    ///
+    /// Required to verify the signature: `sender` is an address (a hash of this
+    /// key), so it cannot be used as a verifying key on its own.
+    #[serde(default)]
+    pub public_key: Option<String>,
     /// Whether this is a coinbase (mining reward) transaction
     #[serde(default)]
     pub is_coinbase_tx: bool,
@@ -59,6 +89,7 @@ impl Transaction {
             amount,
             timestamp: Utc::now(),
             signature: None,
+            public_key: None,
             is_coinbase_tx: false,
         }
     }
@@ -77,6 +108,7 @@ impl Transaction {
             amount,
             timestamp: Utc::now(),
             signature: Some("COINBASE_SIGNATURE".to_string()),
+            public_key: None,
             is_coinbase_tx: true,
         }
     }
@@ -94,54 +126,66 @@ impl Transaction {
         hex::encode(hasher.finalize())
     }
 
-    /// Sign the transaction with an ed25519 private key
-    pub fn sign(&mut self, private_key: &str) {
-        use ed25519_dalek::{SigningKey, Signer};
-        let key_bytes = hex::decode(private_key).expect("Invalid private key hex");
-        let signing_key = SigningKey::from_bytes(&key_bytes.try_into().expect("Invalid key length"));
+    /// Sign the transaction with a hex-encoded 32-byte ed25519 private key.
+    ///
+    /// Returns [`SignError`] rather than panicking, so a malformed key is a
+    /// rejected transaction instead of a downed node.
+    pub fn sign(&mut self, private_key: &str) -> Result<(), SignError> {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let key_bytes =
+            hex::decode(private_key).map_err(|e| SignError::InvalidHex(e.to_string()))?;
+        let key_array: [u8; 32] = key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| SignError::InvalidLength(key_bytes.len()))?;
+
+        let signing_key = SigningKey::from_bytes(&key_array);
         let message = format!("{}{}{}{}", self.sender, self.recipient, self.amount, self.timestamp);
         let signature = signing_key.sign(message.as_bytes());
         self.signature = Some(hex::encode(signature.to_bytes()));
+        self.public_key = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        Ok(())
     }
 
-    /// Verify the transaction signature using ed25519
-    /// Returns true if the transaction appears valid
+    /// Verify the transaction signature using ed25519.
+    ///
+    /// Three things must hold: the signature is well-formed, the carried public
+    /// key actually owns the `sender` address, and the signature is valid over
+    /// this transaction's fields. Binding the key to the address is what stops a
+    /// valid signature from an unrelated key being accepted as the sender's.
     pub fn verify(&self) -> bool {
         // Coinbase transactions are always valid
         if self.is_coinbase() {
             return true;
         }
 
-        // Check that signature exists
-        let signature_hex = match &self.signature {
-            Some(s) => s,
-            None => return false,
+        let (Some(signature_hex), Some(public_key_hex)) = (&self.signature, &self.public_key) else {
+            return false;
         };
 
-        let sig_bytes = match hex::decode(signature_hex) {
-            Ok(b) => b,
-            Err(_) => return false,
+        let Ok(sig_bytes) = hex::decode(signature_hex) else {
+            return false;
         };
-
-        let sig_array: [u8; 64] = match sig_bytes.try_into() {
-            Ok(a) => a,
-            Err(_) => return false,
+        let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+            return false;
         };
         let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
 
-        // sender field is the address, we need the public key from the transaction
-        // For now, verify the signature is well-formed
-        // In production, the public key would be included in the transaction
-        let pub_key_bytes = match hex::decode(&self.sender) {
-            Ok(b) if b.len() == 32 => b,
-            _ => return false,
-        };
+        // The public key must own the sender address. Accept the raw key as its
+        // own address too, so a key-addressed transaction stays verifiable.
+        if self.sender != derive_address(public_key_hex) && self.sender != *public_key_hex {
+            return false;
+        }
 
-        let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(
-            &pub_key_bytes.try_into().unwrap_or([0u8; 32]),
-        ) {
-            Ok(k) => k,
-            Err(_) => return false,
+        let Ok(pub_key_bytes) = hex::decode(public_key_hex) else {
+            return false;
+        };
+        let Ok(pub_key_array) = <[u8; 32]>::try_from(pub_key_bytes.as_slice()) else {
+            return false;
+        };
+        let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pub_key_array) else {
+            return false;
         };
 
         let message = format!("{}{}{}{}", self.sender, self.recipient, self.amount, self.timestamp);
@@ -212,7 +256,7 @@ mod tests {
             100,
         );
 
-        tx.sign(&private_key_hex);
+        tx.sign(&private_key_hex).expect("a freshly generated key must sign");
         assert!(tx.signature.is_some());
     }
 }

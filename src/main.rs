@@ -153,7 +153,7 @@ fn handle_transaction_command(action: TransactionCommands) -> Result<()> {
             let mut blockchain = Blockchain::from_json(&bc_json)?;
 
             // Create and add transaction
-            let tx = wallet.create_transaction(&to, amount);
+            let tx = wallet.create_transaction(&to, amount)?;
             blockchain.add_transaction(tx.clone())?;
 
             // Save blockchain
@@ -425,7 +425,7 @@ fn run_demo(difficulty: usize) -> Result<()> {
 
     // Create transaction
     println!("5. Creating transaction: Miner -> Alice (25 coins)...");
-    let tx = miner.create_transaction(&alice.address, 25);
+    let tx = miner.create_transaction(&alice.address, 25)?;
     blockchain.add_transaction(tx)?;
     println!("   ✓ Transaction added to mempool");
     println!();
@@ -440,7 +440,7 @@ fn run_demo(difficulty: usize) -> Result<()> {
 
     // Create another transaction
     println!("7. Creating transaction: Alice -> Bob (10 coins)...");
-    let tx2 = alice.create_transaction(&bob.address, 10);
+    let tx2 = alice.create_transaction(&bob.address, 10)?;
     blockchain.add_transaction(tx2)?;
     println!("   ✓ Transaction added to mempool");
     println!();

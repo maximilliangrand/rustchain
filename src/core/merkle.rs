@@ -144,7 +144,7 @@ impl MerkleTree {
             let padded_size = if level_size % 2 == 1 { level_size + 1 } else { level_size };
 
             // Get sibling
-            let sibling_index = if current_index % 2 == 0 {
+            let sibling_index = if current_index.is_multiple_of(2) {
                 current_index + 1
             } else {
                 current_index - 1
@@ -166,7 +166,7 @@ impl MerkleTree {
 
             // Move to next level
             level_start += padded_size;
-            level_size = (level_size + 1) / 2;
+            level_size = level_size.div_ceil(2);
             current_index /= 2;
         }
 
