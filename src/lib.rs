@@ -26,7 +26,7 @@
 //! // In a real scenario, Alice would need to receive coins first
 //!
 //! // Mine some blocks
-//! blockchain.mine_pending_transactions(&alice.address);
+//! blockchain.mine_pending_transactions(&alice.address).expect("a fresh block is valid");
 //!
 //! // Check balance
 //! println!("Alice's balance: {}", blockchain.get_balance(&alice.address));

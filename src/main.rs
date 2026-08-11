@@ -73,6 +73,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Truncate a string for display without ever slicing mid-character.
+///
+/// Chain data is untrusted input — a short or non-ASCII address must not panic
+/// the CLI.
+fn short(value: &str, chars: usize) -> &str {
+    match value.char_indices().nth(chars) {
+        Some((byte_index, _)) => &value[..byte_index],
+        None => value,
+    }
+}
+
 /// Initialize a new blockchain
 fn init_blockchain(difficulty: usize, output: &Path) -> Result<()> {
     info!("Initializing new blockchain with difficulty {}...", difficulty);
@@ -122,7 +133,8 @@ fn handle_wallet_command(action: WalletCommands) -> Result<()> {
         }
 
         WalletCommands::Import { key, output } => {
-            let wallet = Wallet::from_private_key(&key);
+            let wallet = Wallet::from_private_key(&key)
+                .context("Failed to import wallet")?;
 
             println!("✓ Wallet imported!");
             println!("  Address: {}", wallet.address);
@@ -179,7 +191,7 @@ fn handle_transaction_command(action: TransactionCommands) -> Result<()> {
                 println!("Pending Transactions ({}):", blockchain.pending_transactions.len());
                 for tx in &blockchain.pending_transactions {
                     println!("  {} -> {} : {} coins",
-                        &tx.sender[..20], &tx.recipient[..20.min(tx.recipient.len())], tx.amount);
+                        short(&tx.sender, 20), short(&tx.recipient, 20), tx.amount);
                 }
             }
         }
@@ -194,14 +206,14 @@ fn handle_transaction_command(action: TransactionCommands) -> Result<()> {
             if txs.is_empty() {
                 println!("No transactions found for address: {}", address);
             } else {
-                println!("Transaction History for {}:", &address[..20.min(address.len())]);
+                println!("Transaction History for {}:", short(&address, 20));
                 for tx in txs {
                     let direction = if tx.sender == address { "SENT" } else { "RECEIVED" };
                     let other = if tx.sender == address { &tx.recipient } else { &tx.sender };
                     println!("  {} {} coins {} {}",
                         direction, tx.amount,
                         if direction == "SENT" { "to" } else { "from" },
-                        &other[..20.min(other.len())]);
+                        short(other, 20));
                 }
             }
         }
@@ -221,7 +233,9 @@ fn mine_block(address: &str, bc_path: &Path) -> Result<()> {
     println!("  Pending transactions: {}", blockchain.pending_transactions.len());
 
     let start = std::time::Instant::now();
-    let block = blockchain.mine_pending_transactions(address);
+    let block = blockchain
+        .mine_pending_transactions(address)
+        .context("Mining failed - the blockchain file is unchanged")?;
     let duration = start.elapsed();
 
     // Save updated blockchain
@@ -265,8 +279,8 @@ fn show_info(bc_path: &Path, verbose: bool) -> Result<()> {
         for block in &blockchain.chain {
             println!("\n  Block #{}", block.index);
             println!("    Hash:       {}", block.hash);
-            println!("    Prev Hash:  {}...", &block.previous_hash[..16]);
-            println!("    Merkle:     {}...", &block.merkle_root[..16]);
+            println!("    Prev Hash:  {}...", short(&block.previous_hash, 16));
+            println!("    Merkle:     {}...", short(&block.merkle_root, 16));
             println!("    Nonce:      {}", block.nonce);
             println!("    Tx Count:   {}", block.transaction_count());
             println!("    Timestamp:  {}", block.timestamp);
@@ -301,10 +315,10 @@ fn show_block(identifier: &str, bc_path: &Path) -> Result<()> {
             println!("  Transactions ({}):", block.transaction_count());
             for tx in &block.transactions {
                 if tx.is_coinbase() {
-                    println!("    [COINBASE] {} coins -> {}", tx.amount, &tx.recipient[..20.min(tx.recipient.len())]);
+                    println!("    [COINBASE] {} coins -> {}", tx.amount, short(&tx.recipient, 20));
                 } else {
                     println!("    {} -> {}: {} coins",
-                        &tx.sender[..20], &tx.recipient[..20.min(tx.recipient.len())], tx.amount);
+                        short(&tx.sender, 20), short(&tx.recipient, 20), tx.amount);
                 }
             }
         }
@@ -352,7 +366,7 @@ fn validate_chain(bc_path: &Path) -> Result<()> {
 }
 
 /// Run a network node
-fn run_node(port: u16, bc_path: &Path, _peers: Vec<String>) -> Result<()> {
+fn run_node(port: u16, bc_path: &Path, peers: Vec<String>) -> Result<()> {
     let bc_json = fs::read_to_string(bc_path)
         .context("Failed to read blockchain file")?;
     let blockchain = Blockchain::from_json(&bc_json)?;
@@ -364,14 +378,21 @@ fn run_node(port: u16, bc_path: &Path, _peers: Vec<String>) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     rt.block_on(async {
-        let node = rustchain::network::Node::new(blockchain, port);
+        let node = rustchain::network::Node::new(blockchain, port)
+            .with_storage(bc_path.to_path_buf());
 
-        // Connect to initial peers
-        for peer in _peers {
+        // Connect to initial peers and adopt the longest chain they offer
+        for peer in peers {
             if let Err(e) = node.connect_to_peer(&peer).await {
                 error!("Failed to connect to peer {}: {}", peer, e);
+                continue;
+            }
+            if let Err(e) = node.sync_with_peer(&peer).await {
+                error!("Failed to sync with peer {}: {}", peer, e);
             }
         }
+
+        println!("Chain height after sync: {} blocks", node.blockchain.read().await.len());
 
         // Start the node server
         if let Err(e) = node.start().await {
@@ -401,9 +422,9 @@ fn run_demo(difficulty: usize) -> Result<()> {
     let alice = Wallet::new();
     let bob = Wallet::new();
     let miner = Wallet::new();
-    println!("   ✓ Alice: {}", &alice.address[..20]);
-    println!("   ✓ Bob:   {}", &bob.address[..20]);
-    println!("   ✓ Miner: {}", &miner.address[..20]);
+    println!("   ✓ Alice: {}", short(&alice.address, 20));
+    println!("   ✓ Bob:   {}", short(&bob.address, 20));
+    println!("   ✓ Miner: {}", short(&miner.address, 20));
     println!();
 
     // Initial balances
@@ -417,9 +438,9 @@ fn run_demo(difficulty: usize) -> Result<()> {
     // Mine first block to give miner some coins
     println!("4. Mining block 1 (miner gets reward)...");
     let start = std::time::Instant::now();
-    let block1 = blockchain.mine_pending_transactions(&miner.address);
+    let block1 = blockchain.mine_pending_transactions(&miner.address)?;
     println!("   ✓ Block mined in {:?}", start.elapsed());
-    println!("   Hash: {}...", &block1.hash[..32]);
+    println!("   Hash: {}...", short(&block1.hash, 32));
     println!("   Nonce: {}", block1.nonce);
     println!();
 
@@ -433,7 +454,7 @@ fn run_demo(difficulty: usize) -> Result<()> {
     // Mine second block
     println!("6. Mining block 2 (includes transaction)...");
     let start = std::time::Instant::now();
-    let block2 = blockchain.mine_pending_transactions(&miner.address);
+    let block2 = blockchain.mine_pending_transactions(&miner.address)?;
     println!("   ✓ Block mined in {:?}", start.elapsed());
     println!("   Transactions in block: {}", block2.transaction_count());
     println!();
@@ -448,7 +469,7 @@ fn run_demo(difficulty: usize) -> Result<()> {
     // Mine third block
     println!("8. Mining block 3...");
     let start = std::time::Instant::now();
-    blockchain.mine_pending_transactions(&miner.address);
+    blockchain.mine_pending_transactions(&miner.address)?;
     println!("   ✓ Block mined in {:?}", start.elapsed());
     println!();
 

@@ -73,13 +73,18 @@ impl Block {
     ///
     /// The genesis block has no previous hash and often contains
     /// a special message or initial distribution of coins
+    ///
+    /// It is fully deterministic — fixed transaction id and fixed timestamp — so
+    /// every node derives the identical genesis hash. Without that, two honest
+    /// nodes start from different roots and are, in effect, two currencies.
     pub fn genesis() -> Self {
-        let genesis_tx = Transaction::coinbase(
+        let genesis_tx = Transaction::genesis_coinbase(
             "genesis_address".to_string(),
             1_000_000, // Initial coin supply
         );
 
         let mut block = Self::new(0, vec![genesis_tx], "0".repeat(64));
+        block.timestamp = DateTime::UNIX_EPOCH;
         block.hash = block.calculate_hash();
         block
     }
@@ -226,6 +231,13 @@ mod tests {
         assert_eq!(genesis.previous_hash, "0".repeat(64));
         assert_eq!(genesis.transaction_count(), 1);
         assert!(genesis.transactions[0].is_coinbase());
+    }
+
+    #[test]
+    fn genesis_block_is_deterministic() {
+        // Every node must agree on the root of the chain, so the genesis block
+        // may not depend on a random UUID or the wall clock.
+        assert_eq!(Block::genesis().hash, Block::genesis().hash);
     }
 
     #[test]

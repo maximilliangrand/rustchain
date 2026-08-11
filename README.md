@@ -9,10 +9,10 @@ A blockchain implementation from scratch in Rust. Built for educational purposes
 
 - **Complete Blockchain Implementation**
   - SHA-256 cryptographic hashing
-  - Merkle trees for transaction verification
+  - Merkle trees for transaction verification, with inclusion proofs
   - Proof-of-Work consensus algorithm
-  - UTXO-based balance tracking
-  - Chain validation and tamper detection
+  - UTXO-based balance tracking, derived from the chain rather than stored
+  - Chain validation and tamper detection (proof-of-work, signatures, balances, replay)
 
 - **Wallet System**
   - Key pair generation
@@ -20,9 +20,12 @@ A blockchain implementation from scratch in Rust. Built for educational purposes
   - Address derivation
 
 - **P2P Networking**
-  - Node discovery and connection
+  - Node discovery and connection, over a length-prefixed message framing
   - Block and transaction propagation
-  - Chain synchronization (longest chain rule)
+  - Chain synchronization (longest chain rule), persisted to the node's chain file
+
+  Nodes do not mine on their own: blocks are produced with the `mine` command and
+  propagate from there.
 
 - **Full CLI Interface**
   - Initialize blockchain
@@ -223,9 +226,10 @@ With difficulty `d`, the hash must start with `d` zeros:
 ### Consensus
 
 Nodes follow the **longest chain rule**:
-- Valid chain with most accumulated work wins
-- Forks are resolved by chain length
-- Transactions not in winning chain return to mempool
+- The longest *valid* chain wins, and it must share our genesis block
+- Every block of an incoming chain is re-validated (proof-of-work, signatures, balances) before it is adopted
+- Forks are resolved by chain length; difficulty is fixed, so length is the work
+- Transactions not in the winning chain return to the mempool
 
 ## Project Structure
 
@@ -266,14 +270,14 @@ fn main() {
     let bob = Wallet::new();
 
     // Mine a block (alice gets reward)
-    blockchain.mine_pending_transactions(&alice.address);
+    blockchain.mine_pending_transactions(&alice.address).unwrap();
 
     // Create and add transaction
-    let tx = alice.create_transaction(&bob.address, 25);
+    let tx = alice.create_transaction(&bob.address, 25).unwrap();
     blockchain.add_transaction(tx).unwrap();
 
     // Mine block to confirm transaction
-    blockchain.mine_pending_transactions(&alice.address);
+    blockchain.mine_pending_transactions(&alice.address).unwrap();
 
     // Check balances
     println!("Alice: {} coins", blockchain.get_balance(&alice.address));

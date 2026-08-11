@@ -113,17 +113,62 @@ impl Transaction {
         }
     }
 
+    /// Create the deterministic coinbase transaction of the genesis block.
+    ///
+    /// Every node must derive the *same* genesis block, otherwise two honest
+    /// nodes are on two different currencies and the genesis check in
+    /// [`crate::core::Blockchain::replace_chain`] can never hold. So this one
+    /// coinbase has a fixed id and a fixed timestamp instead of a random UUID
+    /// and `Utc::now()`.
+    pub fn genesis_coinbase(recipient: String, amount: u64) -> Self {
+        Self {
+            id: "genesis".to_string(),
+            sender: "COINBASE".to_string(),
+            recipient,
+            amount,
+            timestamp: DateTime::UNIX_EPOCH,
+            signature: Some("COINBASE_SIGNATURE".to_string()),
+            public_key: None,
+            is_coinbase_tx: true,
+        }
+    }
+
     /// Calculate the hash of this transaction
     /// Used for creating Merkle trees and transaction verification
+    ///
+    /// Every field that affects validation or accounting is in the preimage.
+    /// `is_coinbase_tx` and `public_key` in particular: leaving them out let a
+    /// user payment be rewritten into a coinbase (which skips signature checks
+    /// entirely) without changing the Merkle root or the block hash.
     pub fn hash(&self) -> String {
         let sig = self.signature.as_deref().unwrap_or("");
+        let public_key = self.public_key.as_deref().unwrap_or("");
         let tx_data = format!(
-            "{}{}{}{}{}{}",
-            self.id, self.sender, self.recipient, self.amount, self.timestamp, sig
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            self.id,
+            self.sender,
+            self.recipient,
+            self.amount,
+            self.timestamp,
+            sig,
+            public_key,
+            self.is_coinbase_tx
         );
         let mut hasher = Sha256::new();
         hasher.update(tx_data.as_bytes());
         hex::encode(hasher.finalize())
+    }
+
+    /// The exact bytes covered by the signature.
+    ///
+    /// The `id` is inside the payload so it cannot be swapped for a fresh UUID
+    /// to sidestep the spent-id index the chain keeps; the fields are separated
+    /// so that no two different transactions can share a preimage.
+    fn signing_payload(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.id, self.sender, self.recipient, self.amount, self.timestamp
+        )
     }
 
     /// Sign the transaction with a hex-encoded 32-byte ed25519 private key.
@@ -141,8 +186,7 @@ impl Transaction {
             .map_err(|_| SignError::InvalidLength(key_bytes.len()))?;
 
         let signing_key = SigningKey::from_bytes(&key_array);
-        let message = format!("{}{}{}{}", self.sender, self.recipient, self.amount, self.timestamp);
-        let signature = signing_key.sign(message.as_bytes());
+        let signature = signing_key.sign(self.signing_payload().as_bytes());
         self.signature = Some(hex::encode(signature.to_bytes()));
         self.public_key = Some(hex::encode(signing_key.verifying_key().to_bytes()));
         Ok(())
@@ -172,9 +216,10 @@ impl Transaction {
         };
         let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
 
-        // The public key must own the sender address. Accept the raw key as its
-        // own address too, so a key-addressed transaction stays verifiable.
-        if self.sender != derive_address(public_key_hex) && self.sender != *public_key_hex {
+        // The public key must own the sender address. There is exactly one
+        // address per key: accepting the raw key as a second identity would give
+        // every key two disjoint balances.
+        if self.sender != derive_address(public_key_hex) {
             return false;
         }
 
@@ -188,9 +233,10 @@ impl Transaction {
             return false;
         };
 
-        let message = format!("{}{}{}{}", self.sender, self.recipient, self.amount, self.timestamp);
         use ed25519_dalek::Verifier;
-        verifying_key.verify(message.as_bytes(), &signature).is_ok()
+        verifying_key
+            .verify(self.signing_payload().as_bytes(), &signature)
+            .is_ok()
     }
 
     /// Check if this is a coinbase transaction
@@ -258,5 +304,71 @@ mod tests {
 
         tx.sign(&private_key_hex).expect("a freshly generated key must sign");
         assert!(tx.signature.is_some());
+    }
+
+    /// Build a signed transaction from a fresh key, addressed correctly.
+    fn signed_transaction(recipient: &str, amount: u64) -> Transaction {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let mut tx = Transaction::new(derive_address(&public_key), recipient.to_string(), amount);
+        tx.sign(&hex::encode(signing_key.to_bytes()))
+            .expect("a freshly generated key must sign");
+        tx
+    }
+
+    #[test]
+    fn hash_covers_the_coinbase_flag_and_public_key() {
+        // Regression: these two fields were outside the hash preimage, so a
+        // payment could be rewritten into an (unverified) coinbase without
+        // changing the Merkle root or the block hash.
+        let tx = signed_transaction("bob", 100);
+        let original = tx.hash();
+
+        let mut promoted = tx.clone();
+        promoted.is_coinbase_tx = true;
+        assert_ne!(original, promoted.hash(), "the coinbase flag must be hashed");
+
+        let mut stripped = tx.clone();
+        stripped.public_key = None;
+        assert_ne!(original, stripped.hash(), "the public key must be hashed");
+    }
+
+    #[test]
+    fn signature_covers_the_transaction_id() {
+        // The id is inside the signed payload, so an attacker cannot mint a
+        // fresh UUID for a captured signature to defeat the spent-id index.
+        let tx = signed_transaction("bob", 100);
+        assert!(tx.verify());
+
+        let mut relabelled = tx.clone();
+        relabelled.id = Uuid::new_v4().to_string();
+        assert!(!relabelled.verify(), "a re-identified transaction must not verify");
+    }
+
+    #[test]
+    fn raw_public_key_is_not_a_second_identity() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        // Regression: verify() used to accept `sender == public_key`, giving one
+        // keypair two spendable balances.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let mut tx = Transaction::new(public_key.clone(), "bob".to_string(), 100);
+        tx.sign(&hex::encode(signing_key.to_bytes()))
+            .expect("a freshly generated key must sign");
+
+        assert!(!tx.verify(), "the raw public key is not a valid sender address");
+    }
+
+    #[test]
+    fn genesis_coinbase_is_deterministic() {
+        let a = Transaction::genesis_coinbase("genesis_address".to_string(), 1_000_000);
+        let b = Transaction::genesis_coinbase("genesis_address".to_string(), 1_000_000);
+
+        assert_eq!(a.hash(), b.hash());
     }
 }

@@ -48,20 +48,27 @@ impl Wallet {
     }
 
     /// Create a wallet from an existing private key
-    pub fn from_private_key(private_key: &str) -> Self {
-        let key_bytes = hex::decode(private_key).expect("Invalid private key hex");
-        let signing_key = SigningKey::from_bytes(
-            &key_bytes.try_into().expect("Invalid key length: expected 32 bytes"),
-        );
+    ///
+    /// The key comes straight from a CLI argument, so a typo is a rejected
+    /// import ([`SignError`]) rather than a panicking process.
+    pub fn from_private_key(private_key: &str) -> Result<Self, SignError> {
+        let key_bytes =
+            hex::decode(private_key).map_err(|e| SignError::InvalidHex(e.to_string()))?;
+        let key_array: [u8; 32] = key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| SignError::InvalidLength(key_bytes.len()))?;
+
+        let signing_key = SigningKey::from_bytes(&key_array);
         let verifying_key = signing_key.verifying_key();
         let public_key = hex::encode(verifying_key.to_bytes());
         let address = Self::generate_address(&public_key);
 
-        Self {
+        Ok(Self {
             address,
             private_key: private_key.to_string(),
             public_key,
-        }
+        })
     }
 
     /// Generate address from public key.
@@ -130,10 +137,29 @@ mod tests {
     #[test]
     fn test_from_private_key() {
         let wallet1 = Wallet::new();
-        let wallet2 = Wallet::from_private_key(&wallet1.private_key);
+        let wallet2 = Wallet::from_private_key(&wallet1.private_key)
+            .expect("a wallet's own key must import");
 
         assert_eq!(wallet1.address, wallet2.address);
         assert_eq!(wallet1.public_key, wallet2.public_key);
+    }
+
+    #[test]
+    fn importing_a_malformed_key_is_an_error_not_a_panic() {
+        // `wallet import` passes this argument straight through, so a typo must
+        // not take the process down.
+        assert_eq!(
+            Wallet::from_private_key("zz").unwrap_err(),
+            SignError::InvalidHex("Invalid character 'z' at position 0".to_string())
+        );
+        assert_eq!(
+            Wallet::from_private_key("abc").unwrap_err(),
+            SignError::InvalidHex("Odd number of digits".to_string())
+        );
+        assert_eq!(
+            Wallet::from_private_key("abcd").unwrap_err(),
+            SignError::InvalidLength(2)
+        );
     }
 
     #[test]
