@@ -5,11 +5,11 @@
 //! - Address generation
 //! - Transaction signing
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
+use crate::core::transaction::{derive_address, SignError};
 use crate::core::Transaction;
 
 /// Represents a wallet with key pairs
@@ -64,30 +64,32 @@ impl Wallet {
         }
     }
 
-    /// Generate address from public key
+    /// Generate address from public key.
+    ///
+    /// Delegates to [`crate::core::transaction::derive_address`] so the wallet and
+    /// the verifier can never disagree about what a sender's address is.
     fn generate_address(public_key: &str) -> String {
-        // Simplified: in production use RIPEMD-160(SHA-256(public_key))
-        let mut hasher = Sha256::new();
-        hasher.update(public_key.as_bytes());
-        let hash = hex::encode(hasher.finalize());
-        // Take first 40 characters as address
-        format!("0x{}", &hash[..40])
+        derive_address(public_key)
     }
 
     /// Create and sign a transaction
-    pub fn create_transaction(&self, recipient: &str, amount: u64) -> Transaction {
+    pub fn create_transaction(
+        &self,
+        recipient: &str,
+        amount: u64,
+    ) -> Result<Transaction, SignError> {
         let mut tx = Transaction::new(
             self.address.clone(),
             recipient.to_string(),
             amount,
         );
-        tx.sign(&self.private_key);
-        tx
+        tx.sign(&self.private_key)?;
+        Ok(tx)
     }
 
     /// Sign an existing transaction
-    pub fn sign_transaction(&self, transaction: &mut Transaction) {
-        transaction.sign(&self.private_key);
+    pub fn sign_transaction(&self, transaction: &mut Transaction) -> Result<(), SignError> {
+        transaction.sign(&self.private_key)
     }
 
     /// Get the wallet address
@@ -135,9 +137,42 @@ mod tests {
     }
 
     #[test]
+    fn wallet_transaction_actually_verifies() {
+        // Regression: the wallet addresses a transaction by address hash, so
+        // verification must use the public key carried on the transaction. When
+        // it tried to read the address as a key, every real wallet transaction
+        // was rejected by the chain.
+        let wallet = Wallet::new();
+        let tx = wallet
+            .create_transaction("recipient_address", 100)
+            .expect("a generated wallet key must sign");
+
+        assert!(tx.verify(), "a wallet-signed transaction must verify");
+    }
+
+    #[test]
+    fn foreign_key_cannot_impersonate_a_sender() {
+        // A validly signed transaction is still refused when the signing key does
+        // not own the sender address it claims.
+        let victim = Wallet::new();
+        let attacker = Wallet::new();
+
+        let mut tx = Transaction::new(victim.address.clone(), "bob".to_string(), 100);
+        tx.sign(&attacker.private_key)
+            .expect("the attacker's key is well-formed");
+
+        assert!(
+            !tx.verify(),
+            "a signature from a key that does not own the sender address must be refused"
+        );
+    }
+
+    #[test]
     fn test_create_transaction() {
         let wallet = Wallet::new();
-        let tx = wallet.create_transaction("recipient_address", 100);
+        let tx = wallet
+            .create_transaction("recipient_address", 100)
+            .expect("a generated wallet key must sign");
 
         assert_eq!(tx.sender, wallet.address);
         assert_eq!(tx.recipient, "recipient_address");
