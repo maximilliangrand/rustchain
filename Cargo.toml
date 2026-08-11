@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Maxim Gagiev <maximgagiev@myg-media.com>"]
 description = "A blockchain implementation from scratch in Rust - educational & portfolio project"
-repository = "https://github.com/grandillionaire/rustchain"
+repository = "https://github.com/maximilliangrand/rustchain"
 license = "MIT"
 keywords = ["blockchain", "cryptocurrency", "rust", "distributed-systems"]
 
