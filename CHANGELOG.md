@@ -32,6 +32,17 @@ enforces its own quality bar on every push.
   sender can never commit more than it holds, every Merkle proof verifies
   against its own root, and a signature verifies only while its payload is
   untouched. Each was checked by breaking the production line it guards.
+- A Criterion benchmark suite (`benches/core.rs`, registered as a
+  `harness = false` bench target) over the four costs that decide how a node
+  behaves: block header hashing, ed25519 signing and verification, Merkle tree
+  construction from 1 to 10,000 leaves, and proof-of-work, both the raw
+  hash-attempt rate and full mining at difficulties 1 through 4. Each mining
+  benchmark averages over a pool of distinct headers, because a single block is
+  one draw from a geometric distribution rather than the expected work. A CI job
+  compiles the suite (`cargo bench --no-run`); timings from a shared runner
+  would be noise.
+- A measured "Performance" table in the README, replacing figures that had never
+  been run.
 - A `cargo-fuzz` harness (`fuzz/`) with five targets covering every byte the
   node takes from somewhere it does not control: `Transaction` and `Block`
   deserialization, `Message` decoding, the length-prefixed framing in

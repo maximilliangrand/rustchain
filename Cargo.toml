@@ -48,6 +48,11 @@ proptest = "1.11.0"
 name = "rustchain"
 path = "src/main.rs"
 
+# Criterion brings its own harness, so the built-in test harness is turned off.
+[[bench]]
+name = "core"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

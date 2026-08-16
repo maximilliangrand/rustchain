@@ -300,6 +300,8 @@ rustchain/
 │       └── mod.rs       # Command-line interface
 ├── tests/
 │   └── properties.rs    # Property-based tests over the consensus invariants
+├── benches/
+│   └── core.rs          # Criterion benchmarks (hashing, signatures, Merkle, mining)
 └── fuzz/
     ├── fuzz_targets/    # cargo-fuzz targets for every untrusted decode path
     └── seeds/           # Checked-in seed corpora
@@ -352,14 +354,52 @@ This implementation is designed to demonstrate blockchain concepts clearly. In a
 
 ## Performance
 
-Benchmarks on Apple M1:
+`benches/core.rs` is a [Criterion](https://github.com/bheisler/criterion.rs) suite over the
+four costs that decide how a node behaves: header hashing, signature verification, Merkle
+tree construction, and proof-of-work.
 
-| Operation | Time |
-|-----------|------|
-| Hash calculation | ~500ns |
-| Block mining (difficulty 4) | ~100ms |
-| Transaction verification | ~1μs |
-| Chain validation (100 blocks) | ~5ms |
+```bash
+cargo bench                       # the whole suite (~4 minutes)
+cargo bench -- merkle             # one group
+cargo bench --no-run              # compile only
+```
+
+The figures below are the medians Criterion reported on **one** machine, an Apple M4,
+macOS 26.6, `rustc` 1.94.0 stable, release profile with LTO, single-threaded. They are
+illustrative: treat the ratios as the durable part and re-run `cargo bench` for your own
+hardware.
+
+| Operation | Median | Throughput |
+|-----------|--------|------------|
+| Block header hash (`calculate_hash`) | 436 ns | 2.29 M hashes/s |
+| Proof-of-work attempt (nonce + hash) | 435 ns | 2.30 M attempts/s |
+| Transaction signature verify (ed25519) | 21.9 µs | 45.6 K tx/s |
+| Transaction create + sign | 17.7 µs | 56.6 K tx/s |
+| Transaction hash | 991 ns | 1.01 M tx/s |
+| Merkle build, 10 leaves | 7.96 µs | 1.26 M leaves/s |
+| Merkle build, 1,000 leaves | 634 µs | 1.58 M leaves/s |
+| Merkle build, 10,000 leaves | 6.28 ms | 1.59 M leaves/s |
+| Block construction, 256 transactions | 461 µs | 555 K tx/s |
+| Block `verify_transactions`, 256 transactions | 6.15 ms | 41.6 K tx/s |
+| Mining, difficulty 1 | 6.64 µs |, |
+| Mining, difficulty 2 | 119 µs |, |
+| Mining, difficulty 3 | 1.75 ms |, |
+| Mining, difficulty 4 | 28.7 ms |, |
+
+Three things the numbers say:
+
+- **Verification, not hashing, is what bounds a node.** A signature check costs ~50 block
+  hashes, so validating a block is dominated by its transactions: `verify_transactions` over
+  256 payments takes 6.15 ms, and rebuilding the Merkle root over the same 256 transactions
+  is 461 µs of it, under 8%.
+- **Merkle construction is linear**, holding ~1.6 M leaves/s from 100 leaves to 10,000; the
+  smaller sizes are slower per leaf only because the fixed cost of the tree is not yet
+  amortised.
+- **Difficulty is measured, not guessed.** Each mining benchmark averages over a pool of
+  distinct headers, since one block is a single draw from a geometric distribution. The
+  measured times track the expected 16^d attempts (difficulty 4 ≈ 66,000 attempts at
+  435 ns), so the attempt rate extrapolates: difficulty 8 is ~4.3 billion attempts, about
+  31 minutes single-threaded on this machine.
 
 ## Contributing
 

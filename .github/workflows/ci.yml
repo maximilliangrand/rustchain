@@ -86,6 +86,18 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
+  bench:
+    name: Benchmark build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compile the benchmarks only. Timings from a shared CI runner are noise,
+      # so this job exists to keep `benches/` building, not to measure it.
+      - name: cargo bench --no-run
+        run: cargo bench --no-run --locked
+
   build:
     name: Release build
     runs-on: ubuntu-latest
