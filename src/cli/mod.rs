@@ -25,10 +25,12 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub debug: u8,
 
+    /// The subcommand to run
     #[command(subcommand)]
     pub command: Commands,
 }
 
+/// The top-level commands `rustchain` accepts
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new blockchain
@@ -44,12 +46,14 @@ pub enum Commands {
 
     /// Create a new wallet
     Wallet {
+        /// The wallet operation to run
         #[command(subcommand)]
         action: WalletCommands,
     },
 
     /// Transaction operations
     Transaction {
+        /// The transaction operation to run
         #[command(subcommand)]
         action: TransactionCommands,
     },
@@ -126,6 +130,7 @@ pub enum Commands {
     },
 }
 
+/// Wallet operations: key generation, inspection and import
 #[derive(Subcommand)]
 pub enum WalletCommands {
     /// Create a new wallet
@@ -153,6 +158,7 @@ pub enum WalletCommands {
     },
 }
 
+/// Transaction operations: creation, the mempool, and history
 #[derive(Subcommand)]
 pub enum TransactionCommands {
     /// Create a new transaction

@@ -122,8 +122,11 @@ pub enum Message {
     /// socket's remote address is an ephemeral port nobody can dial back, so an
     /// inbound peer can be recorded and propagation works in both directions.
     Version {
+        /// The sender's crate version.
         version: String,
+        /// The height of the sender's chain, so a peer can tell who is behind.
         height: u64,
+        /// The address the sender accepts connections on.
         listen_address: String,
     },
 }

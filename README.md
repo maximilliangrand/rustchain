@@ -13,7 +13,7 @@ A blockchain implementation from scratch in Rust. Built for educational purposes
   - SHA-256 cryptographic hashing
   - Merkle trees for transaction verification, with inclusion proofs
   - Proof-of-Work consensus algorithm
-  - UTXO-based balance tracking, derived from the chain rather than stored
+  - An account-balance ledger, derived from the chain rather than stored
   - Chain validation and tamper detection (proof-of-work, signatures, balances, replay)
 
 - **Wallet System**
@@ -235,11 +235,33 @@ Transactions are organized in a Merkle tree for efficient verification:
 
 This allows proving a transaction is included in a block by providing only O(log n) hashes.
 
+### Canonical Hashing
+
+Everything this chain hashes or signs is encoded the same way, by
+`core::hashing::CanonicalEncoding`: a domain tag first, then each field as an 8-byte
+big-endian length followed by exactly that many bytes.
+
+```
+encoding := field*
+field    := u64 length (big-endian) || `length` bytes
+```
+
+The length prefix is what makes a hash a function of the *fields* rather than of the string
+they were pasted into. Joined with a separator, the payment `("a|b" -> "c")` and the payment
+`("a" -> "b|c")` are the same bytes: one hash, and one signature, covering two different
+transfers. The domain tag keeps a preimage built in one context, a block header, from ever
+being a valid preimage in another, a signature, and is where a network id would go.
+
+Six preimages use it: the transaction hash, the transaction signing payload, the block
+header, and the Merkle leaf, internal node and padding sentinel. See
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) §8.
+
 ### Proof of Work
 
-Mining finds a nonce such that:
+Mining finds a nonce such that the canonical encoding of the block header, index,
+timestamp, Merkle root, previous hash, difficulty and nonce, hashes below the target:
 ```
-SHA256(block_data + nonce) < target
+SHA256(canonical_header(nonce)) < target
 ```
 
 With difficulty `d`, the hash must start with `d` zeros:
@@ -283,6 +305,9 @@ Nodes follow the **longest chain rule**:
 rustchain/
 ├── Cargo.toml           # Dependencies and metadata
 ├── README.md            # This file
+├── SECURITY.md          # Disclosure policy
+├── docs/
+│   └── THREAT-MODEL.md  # Attack surface, and what is not yet defended
 ├── src/
 │   ├── main.rs          # CLI entry point
 │   ├── lib.rs           # Library exports
@@ -291,6 +316,7 @@ rustchain/
 │   │   ├── transaction.rs  # Transaction structure
 │   │   ├── block.rs     # Block structure
 │   │   ├── merkle.rs    # Merkle tree implementation
+│   │   ├── hashing.rs   # Canonical encoding for every preimage
 │   │   └── blockchain.rs   # Blockchain logic
 │   ├── wallet/
 │   │   └── mod.rs       # Wallet & key management
@@ -344,13 +370,24 @@ fn main() {
 
 This implementation is designed to demonstrate blockchain concepts clearly. In a production blockchain, you would also need:
 
-- **Real Cryptography**: Use `secp256k1` for ECDSA signatures instead of simplified hashing
+- **A Production Signature Scheme**: Signatures here are real ed25519; `secp256k1` ECDSA is what Bitcoin and Ethereum tooling expects
 - **Persistent Storage**: Use a database (LevelDB, RocksDB) instead of JSON files
-- **Full UTXO Model**: Track unspent transaction outputs properly
+- **A UTXO Model**: This chain keeps one balance per address; a UTXO set would track unspent outputs instead
 - **Script System**: Add programmable transaction validation (like Bitcoin Script)
 - **Network Security**: Add encryption, authentication, DoS protection
 - **Consensus Upgrades**: Consider PoS, PBFT, or other modern consensus mechanisms
 - **Light Clients**: SPV verification for mobile/lightweight nodes
+
+## Security
+
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) enumerates the attack surface of *this*
+design, double-spend, majority hashpower, eclipse and Sybil attacks on the peer layer, DoS
+through malformed or oversized messages, timestamp manipulation, replay, signature
+malleability and hash ambiguity, and says for each one what the code does, or admits that it
+does nothing. The four largest open gaps are length-based fork choice, an unauthenticated and
+unbounded peer table, an unpriced mempool, and plaintext key files.
+
+[`SECURITY.md`](SECURITY.md) is the disclosure policy.
 
 ## Performance
 
@@ -364,42 +401,48 @@ cargo bench -- merkle             # one group
 cargo bench --no-run              # compile only
 ```
 
-The figures below are the medians Criterion reported on **one** machine, an Apple M4,
+The figures below are the point estimates Criterion reported on **one** machine, an Apple M4,
 macOS 26.6, `rustc` 1.94.0 stable, release profile with LTO, single-threaded. They are
 illustrative: treat the ratios as the durable part and re-run `cargo bench` for your own
 hardware.
 
-| Operation | Median | Throughput |
-|-----------|--------|------------|
-| Block header hash (`calculate_hash`) | 436 ns | 2.29 M hashes/s |
-| Proof-of-work attempt (nonce + hash) | 435 ns | 2.30 M attempts/s |
-| Transaction signature verify (ed25519) | 21.9 µs | 45.6 K tx/s |
-| Transaction create + sign | 17.7 µs | 56.6 K tx/s |
-| Transaction hash | 991 ns | 1.01 M tx/s |
-| Merkle build, 10 leaves | 7.96 µs | 1.26 M leaves/s |
-| Merkle build, 1,000 leaves | 634 µs | 1.58 M leaves/s |
-| Merkle build, 10,000 leaves | 6.28 ms | 1.59 M leaves/s |
-| Block construction, 256 transactions | 461 µs | 555 K tx/s |
-| Block `verify_transactions`, 256 transactions | 6.15 ms | 41.6 K tx/s |
-| Mining, difficulty 1 | 6.64 µs |, |
-| Mining, difficulty 2 | 119 µs |, |
-| Mining, difficulty 3 | 1.75 ms |, |
-| Mining, difficulty 4 | 28.7 ms |, |
+| Operation | Point estimate | Throughput |
+|-----------|----------------|------------|
+| Block header hash (`calculate_hash`) | 538 ns | 1.86 M hashes/s |
+| Proof-of-work attempt (nonce + hash) | 537 ns | 1.86 M attempts/s |
+| Transaction signature verify (ed25519, strict) | 24.2 µs | 41.3 K tx/s |
+| Transaction create + sign | 17.7 µs | 56.5 K tx/s |
+| Transaction hash | 958 ns | 1.04 M tx/s |
+| Merkle build, 10 leaves | 7.36 µs | 1.36 M leaves/s |
+| Merkle build, 1,000 leaves | 637 µs | 1.57 M leaves/s |
+| Merkle build, 10,000 leaves | 6.35 ms | 1.57 M leaves/s |
+| Block construction, 256 transactions | 451 µs | 568 K tx/s |
+| Block `verify_transactions`, 256 transactions | 6.88 ms | 37.2 K tx/s |
+| Mining, difficulty 1 | 9.49 µs |, |
+| Mining, difficulty 2 | 156 µs |, |
+| Mining, difficulty 3 | 2.14 ms |, |
+| Mining, difficulty 4 | 37.5 ms |, |
 
-Three things the numbers say:
+Four things the numbers say:
 
-- **Verification, not hashing, is what bounds a node.** A signature check costs ~50 block
+- **Verification, not hashing, is what bounds a node.** A signature check costs ~45 block
   hashes, so validating a block is dominated by its transactions: `verify_transactions` over
-  256 payments takes 6.15 ms, and rebuilding the Merkle root over the same 256 transactions
-  is 461 µs of it, under 8%.
-- **Merkle construction is linear**, holding ~1.6 M leaves/s from 100 leaves to 10,000; the
+  256 payments takes 6.88 ms, and rebuilding the Merkle root over the same 256 transactions
+  is 451 µs of it, under 7%.
+- **Merkle construction is linear**, holding ~1.55 M leaves/s from 100 leaves to 10,000; the
   smaller sizes are slower per leaf only because the fixed cost of the tree is not yet
   amortised.
 - **Difficulty is measured, not guessed.** Each mining benchmark averages over a pool of
   distinct headers, since one block is a single draw from a geometric distribution. The
   measured times track the expected 16^d attempts (difficulty 4 ≈ 66,000 attempts at
-  435 ns), so the attempt rate extrapolates: difficulty 8 is ~4.3 billion attempts, about
-  31 minutes single-threaded on this machine.
+  537 ns is ~35 ms, against 37.5 ms measured), so the attempt rate extrapolates: difficulty 8
+  is ~4.3 billion attempts, about 38 minutes single-threaded on this machine.
+- **Correctness costs something, and it is cheap.** Re-running the suite against the previous
+  numbers, the canonical encoding made the header hash 23% slower (436 → 538 ns; the
+  transaction hash got 4% *faster*, since it no longer formats a timestamp into a string),
+  and `verify_strict` costs 10% over `verify` (21.9 → 24.2 µs). Merkle construction is
+  unchanged. A quarter of the hash rate is the price of a preimage that cannot be re-split
+  and a signature rule two implementations cannot disagree about.
 
 ## Contributing
 

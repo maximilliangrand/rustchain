@@ -3,8 +3,14 @@
 //! The blockchain maintains:
 //! - The chain of blocks from genesis to tip
 //! - Validation rules for new blocks
-//! - UTXO set (balances) tracking
+//! - An account-balance ledger: one balance per address, derived from the chain
 //! - Mempool for pending transactions
+//!
+//! The ledger is an account model, not a UTXO set. A transaction moves an amount
+//! from one address to another and the two balances are updated in place; there
+//! are no outputs to spend, so there is nothing for a later transaction to point
+//! at. Replay is prevented by the confirmed-transaction-id index rather than by
+//! an output being consumed.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -40,18 +46,29 @@ pub const MINING_REWARD: u64 = 50;
 /// Blockchain errors
 #[derive(Error, Debug)]
 pub enum BlockchainError {
+    /// A block was refused: it broke one of the rules block acceptance
+    /// enforces.
     #[error("Invalid block: {0}")]
     InvalidBlock(String),
 
+    /// A transaction was refused, by the mempool or by block application.
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
 
+    /// A sender cannot cover a spend.
     #[error("Insufficient balance: has {has}, needs {needs}")]
-    InsufficientBalance { has: u64, needs: u64 },
+    InsufficientBalance {
+        /// What the sender holds.
+        has: u64,
+        /// What the transaction would spend.
+        needs: u64,
+    },
 
+    /// A whole chain was refused, by validation or by chain replacement.
     #[error("Invalid chain: {0}")]
     InvalidChain(String),
 
+    /// No block with the requested index or hash is in the chain.
     #[error("Block not found: {0}")]
     BlockNotFound(String),
 
@@ -61,6 +78,7 @@ pub enum BlockchainError {
     #[error("Chain is empty")]
     EmptyChain,
 
+    /// Stored chain data could not be parsed as a [`Blockchain`].
     #[error("Malformed blockchain data: {0}")]
     Malformed(#[from] serde_json::Error),
 }
@@ -80,7 +98,7 @@ pub struct Blockchain {
     pub pending_transactions: Vec<Transaction>,
     /// Mining reward
     pub mining_reward: u64,
-    /// Address balances (UTXO simplified).
+    /// One balance per address: the account ledger, not a UTXO set.
     ///
     /// A derived index, never read from disk: it is rebuilt by replaying the
     /// chain, so it cannot disagree with the blocks.

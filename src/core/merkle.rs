@@ -1,24 +1,29 @@
 //! Merkle Tree implementation for transaction verification
 //!
 //! A Merkle tree is a binary tree where:
-//! - Leaf nodes contain hashes of individual transactions (prefixed with 0x00)
-//! - Internal nodes contain hashes of their children concatenated (prefixed with 0x01)
+//! - Leaf nodes contain hashes of individual transactions
+//! - Internal nodes contain the hash of their two children
 //! - The root hash represents the entire set of transactions
 //!
-//! Domain separation (leaf vs internal node prefix) prevents second preimage attacks
-//! where an attacker could construct a leaf that looks like an internal node.
+//! Every hash here is a `CanonicalEncoding`, so a leaf, an internal node and
+//! the padding sentinel each carry their own domain tag and every child is
+//! length-prefixed. Domain separation prevents second preimage attacks where an
+//! attacker constructs a leaf that looks like an internal node; length-prefixing
+//! keeps a node's two children from being re-split into a different pair.
 //!
-//! Odd levels are padded with a constant sentinel (prefix 0x02), never by
-//! duplicating the last node. Duplicating is the CVE-2012-2459 bug: `[a, b, c]`
-//! and `[a, b, c, c]` would hash to the same root, so two different transaction
-//! sets produce the same block hash and a payment can be silently duplicated
-//! inside a block. The sentinel lives in its own hash domain, so no leaf and no
-//! internal node can ever equal it.
+//! Odd levels are padded with a constant sentinel, never by duplicating the last
+//! node. Duplicating is the CVE-2012-2459 bug: `[a, b, c]` and `[a, b, c, c]`
+//! would hash to the same root, so two different transaction sets produce the
+//! same block hash and a payment can be silently duplicated inside a block. The
+//! sentinel lives in its own hash domain, so no leaf and no internal node can
+//! ever equal it.
 //!
 //! This allows efficient verification that a transaction is included
 //! in a block without downloading all transactions (SPV - Simple Payment Verification)
 
-use sha2::{Digest, Sha256};
+use super::hashing::{
+    CanonicalEncoding, MERKLE_LEAF_DOMAIN, MERKLE_NODE_DOMAIN, MERKLE_PADDING_DOMAIN,
+};
 
 /// A Merkle Tree for efficient transaction verification
 #[derive(Debug, Clone)]
@@ -94,29 +99,29 @@ impl MerkleTree {
         }
     }
 
-    /// Hash a leaf node with domain separation prefix 0x00
+    /// Hash a leaf node in the leaf domain
     fn hash_leaf(data: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"\x00");
-        hasher.update(data.as_bytes());
-        hex::encode(hasher.finalize())
+        CanonicalEncoding::new(MERKLE_LEAF_DOMAIN)
+            .text(data)
+            .hash_hex()
     }
 
-    /// The constant used to pad an odd level, in its own domain (prefix 0x02) so
-    /// it can never collide with a leaf or an internal node.
+    /// The constant used to pad an odd level, in its own domain so it can never
+    /// collide with a leaf or an internal node.
     fn padding_node() -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"\x02");
-        hex::encode(hasher.finalize())
+        CanonicalEncoding::new(MERKLE_PADDING_DOMAIN).hash_hex()
     }
 
-    /// Hash an internal node with domain separation prefix 0x01
+    /// Hash an internal node in the node domain
+    ///
+    /// Both children are length-prefixed. They are fixed-width hex digests in
+    /// every tree this code builds, but a preimage that is only unambiguous
+    /// because of what its caller happens to pass is a rule waiting to be broken.
     fn hash_node(left: &str, right: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"\x01");
-        hasher.update(left.as_bytes());
-        hasher.update(right.as_bytes());
-        hex::encode(hasher.finalize())
+        CanonicalEncoding::new(MERKLE_NODE_DOMAIN)
+            .text(left)
+            .text(right)
+            .hash_hex()
     }
 
     /// Get the Merkle root hash
@@ -313,5 +318,15 @@ mod tests {
         let leaf = MerkleTree::hash_leaf("test");
         let node = MerkleTree::hash_node("test", "");
         assert_ne!(leaf, node);
+    }
+
+    #[test]
+    fn a_node_cannot_be_re_split_into_a_different_pair() {
+        // Concatenating the children put the boundary between them in the data:
+        // ("ab", "c") and ("a", "bc") hashed to the same node.
+        assert_ne!(
+            MerkleTree::hash_node("ab", "c"),
+            MerkleTree::hash_node("a", "bc")
+        );
     }
 }

@@ -574,4 +574,34 @@ proptest! {
             "the coinbase flag must be covered by the hash"
         );
     }
+
+    /// Moving the boundary between two adjacent fields always changes the hash.
+    ///
+    /// This is the field-injection property. The preimage used to be the fields
+    /// joined by `|`, which makes the hash a function of the joined string
+    /// rather than of the fields: the payment `("a|b" -> "c")` and the payment
+    /// `("a" -> "b|c")` produced identical bytes, so one hash, and one
+    /// signature, covered two different transfers. The generators deliberately
+    /// include the old separator.
+    #[test]
+    fn a_field_boundary_cannot_be_moved(
+        left in "[a-z|]{1,8}",
+        middle in "[a-z|]{1,8}",
+        right in "[a-z|]{1,8}",
+        amount in any::<u64>(),
+    ) {
+        let joined = Transaction::new(format!("{}{}", left, middle), right.clone(), amount);
+
+        // The same characters, split one field further along. Everything else,
+        // including the id and the timestamp, is carried over by the clone.
+        let mut resplit = joined.clone();
+        resplit.sender = left;
+        resplit.recipient = format!("{}{}", middle, right);
+
+        prop_assert_ne!(
+            joined.hash(),
+            resplit.hash(),
+            "re-splitting the sender and recipient must change the hash"
+        );
+    }
 }

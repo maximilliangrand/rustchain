@@ -48,6 +48,16 @@ enforces its own quality bar on every push.
   deserialization, `Message` decoding, the length-prefixed framing in
   `read_message`, and `Blockchain::from_json`. Checked-in seed corpora in
   `fuzz/seeds/` and a 60-second-per-target smoke job in CI.
+- `docs/THREAT-MODEL.md`: the attack surface of this design, double-spend,
+  majority hashpower, eclipse and Sybil attacks on the peer layer, DoS through
+  malformed or oversized messages, timestamp manipulation, replay, signature
+  malleability, hash ambiguity, inflation and key storage, with what the code
+  does about each, and where it does nothing, an admission rather than a
+  silence. `SECURITY.md` carries the disclosure policy.
+- `core::hashing::CanonicalEncoding`, the one encoding this chain hashes and
+  signs: a domain tag, then every field as an 8-byte big-endian length followed
+  by exactly that many bytes.
+- `#![warn(missing_docs)]` at the crate root, and the doc comments it asked for.
 
 ### Changed
 
@@ -64,6 +74,16 @@ enforces its own quality bar on every push.
 - The P2P protocol uses length-prefixed framing; the accept loop survives a
   failed accept, connections are bounded and time out, and broadcasts no longer
   hold the peer lock across a connect.
+- Signatures are checked with `verify_strict`, which also refuses small-order
+  keys and non-canonical `R` and `A` encodings. Those are the signatures two
+  ed25519 implementations may legitimately disagree about, and a rule two nodes
+  can disagree about is a chain split.
+- Every hash preimage moved to the canonical encoding, which **changes every
+  hash**: block hashes, transaction hashes, Merkle roots and signing payloads
+  are all different from 0.1.0. Pre-1.0 with no live network, so no migration
+  path is provided; an existing `blockchain.json` will no longer validate.
+- The balance map is described as what it is, an account ledger, one balance
+  per address, instead of "UTXO simplified". This chain has no unspent outputs.
 
 ### Fixed
 
@@ -86,6 +106,16 @@ enforces its own quality bar on every push.
   past `u64::MAX`, a block is deserialized before anything says its amounts are
   affordable. Found by `cargo fuzz run block_deserialize`; both it and
   `Blockchain::total_supply` now saturate.
+- Field injection in every preimage the chain hashed. The transaction hash and
+  the signing payload joined their fields with `|`, so the payment
+  `("a|b" -> "c")` and the payment `("a" -> "b|c")` produced identical bytes:
+  one hash and one signature covering two different transfers. The block header
+  concatenated its fields with no separator at all, so (difficulty 1, nonce 23)
+  and (difficulty 12, nonce 3) hashed identically, one proof-of-work standing
+  for two different claims about how hard the block was. Merkle internal nodes
+  concatenated their children, unambiguous only because of what the caller
+  happened to pass. All five preimages are now length-prefixed and
+  domain-separated.
 
 ## [0.1.0]
 

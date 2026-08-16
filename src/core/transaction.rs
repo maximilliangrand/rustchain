@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::hashing::{CanonicalEncoding, TRANSACTION_HASH_DOMAIN, TRANSACTION_SIGNING_DOMAIN};
+
 /// Derive the canonical address for a hex-encoded ed25519 public key.
 ///
 /// This is the single definition of the address format; [`crate::wallet::Wallet`]
@@ -140,35 +142,48 @@ impl Transaction {
     /// `is_coinbase_tx` and `public_key` in particular: leaving them out let a
     /// user payment be rewritten into a coinbase (which skips signature checks
     /// entirely) without changing the Merkle root or the block hash.
+    ///
+    /// The preimage is the `CanonicalEncoding` of, in order: the domain tag
+    /// `TRANSACTION_HASH_DOMAIN`, `id`, `sender`, `recipient`, `amount`,
+    /// `timestamp`, `signature`, `public_key`, `is_coinbase_tx`. Each field
+    /// carries its own length, so a `|` inside an address is just a byte in that
+    /// address, under the separator-joined preimage this replaced, the
+    /// transaction `("a|b" -> "c")` and the transaction `("a" -> "b|c")` hashed
+    /// identically.
     pub fn hash(&self) -> String {
-        let sig = self.signature.as_deref().unwrap_or("");
-        let public_key = self.public_key.as_deref().unwrap_or("");
-        let tx_data = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            self.id,
-            self.sender,
-            self.recipient,
-            self.amount,
-            self.timestamp,
-            sig,
-            public_key,
-            self.is_coinbase_tx
-        );
-        let mut hasher = Sha256::new();
-        hasher.update(tx_data.as_bytes());
-        hex::encode(hasher.finalize())
+        CanonicalEncoding::new(TRANSACTION_HASH_DOMAIN)
+            .text(&self.id)
+            .text(&self.sender)
+            .text(&self.recipient)
+            .integer(self.amount)
+            .time(&self.timestamp)
+            .optional_text(self.signature.as_deref())
+            .optional_text(self.public_key.as_deref())
+            .flag(self.is_coinbase_tx)
+            .hash_hex()
     }
 
     /// The exact bytes covered by the signature.
     ///
     /// The `id` is inside the payload so it cannot be swapped for a fresh UUID
-    /// to sidestep the spent-id index the chain keeps; the fields are separated
-    /// so that no two different transactions can share a preimage.
-    fn signing_payload(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}",
-            self.id, self.sender, self.recipient, self.amount, self.timestamp
-        )
+    /// to sidestep the spent-id index the chain keeps.
+    ///
+    /// The payload is the `CanonicalEncoding` of the domain tag
+    /// `TRANSACTION_SIGNING_DOMAIN`, `id`, `sender`, `recipient`, `amount` and
+    /// `timestamp`. Length-prefixing every field is what makes "no two different
+    /// transactions share a preimage" true rather than merely intended: with the
+    /// fields joined by `|`, a signature authorising `("a|b" -> "c")` was a
+    /// valid signature over `("a" -> "b|c")` as well. The domain tag keeps the
+    /// payload disjoint from the transaction hash preimage, so neither can ever
+    /// be substituted for the other.
+    fn signing_payload(&self) -> Vec<u8> {
+        CanonicalEncoding::new(TRANSACTION_SIGNING_DOMAIN)
+            .text(&self.id)
+            .text(&self.sender)
+            .text(&self.recipient)
+            .integer(self.amount)
+            .time(&self.timestamp)
+            .into_bytes()
     }
 
     /// Sign the transaction with a hex-encoded 32-byte ed25519 private key.
@@ -186,7 +201,7 @@ impl Transaction {
             .map_err(|_| SignError::InvalidLength(key_bytes.len()))?;
 
         let signing_key = SigningKey::from_bytes(&key_array);
-        let signature = signing_key.sign(self.signing_payload().as_bytes());
+        let signature = signing_key.sign(&self.signing_payload());
         self.signature = Some(hex::encode(signature.to_bytes()));
         self.public_key = Some(hex::encode(signing_key.verifying_key().to_bytes()));
         Ok(())
@@ -234,9 +249,12 @@ impl Transaction {
             return false;
         };
 
-        use ed25519_dalek::Verifier;
+        // `verify_strict`, not `verify`: it additionally refuses small-order and
+        // non-canonically encoded keys and `R` values. Those are signatures that
+        // two ed25519 implementations may legitimately disagree about, and a
+        // rule two nodes can disagree about is a chain split, not a nuisance.
         verifying_key
-            .verify(self.signing_payload().as_bytes(), &signature)
+            .verify_strict(&self.signing_payload(), &signature)
             .is_ok()
     }
 
@@ -328,6 +346,34 @@ mod tests {
         let mut stripped = tx.clone();
         stripped.public_key = None;
         assert_ne!(original, stripped.hash(), "the public key must be hashed");
+    }
+
+    #[test]
+    fn a_separator_in_a_field_cannot_forge_another_transaction() {
+        // Regression: the preimage was the fields joined by `|`, so the payment
+        // "a|b" -> "c" and the payment "a" -> "b|c" produced the same string.
+        // One hash, one signature, two different transfers.
+        let base = Transaction {
+            id: "id".to_string(),
+            sender: "a|b".to_string(),
+            recipient: "c".to_string(),
+            amount: 100,
+            timestamp: DateTime::UNIX_EPOCH,
+            signature: None,
+            public_key: None,
+            is_coinbase_tx: false,
+        };
+
+        let mut resplit = base.clone();
+        resplit.sender = "a".to_string();
+        resplit.recipient = "b|c".to_string();
+
+        assert_ne!(base.hash(), resplit.hash(), "the hashes must differ");
+        assert_ne!(
+            base.signing_payload(),
+            resplit.signing_payload(),
+            "the signed bytes must differ"
+        );
     }
 
     #[test]

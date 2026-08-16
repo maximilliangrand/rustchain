@@ -5,9 +5,11 @@
 //! - Blocks: Containers for transactions with proof-of-work
 //! - Merkle Trees: Efficient verification of transaction integrity
 //! - Blockchain: The chain of blocks with validation logic
+//! - Canonical encoding: The one unambiguous preimage everything above hashes
 
 pub mod block;
 pub mod blockchain;
+pub(crate) mod hashing;
 pub mod merkle;
 pub mod transaction;
 

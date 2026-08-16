@@ -12,8 +12,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use super::hashing::{CanonicalEncoding, BLOCK_HASH_DOMAIN};
 use super::merkle::MerkleTree;
 use super::transaction::Transaction;
 
@@ -101,22 +101,23 @@ impl Block {
 
     /// Calculate the hash of this block
     ///
-    /// The hash is computed from:
-    /// index + timestamp + merkle_root + previous_hash + difficulty + nonce
+    /// The preimage is the `CanonicalEncoding` of, in order: the domain tag
+    /// `BLOCK_HASH_DOMAIN`, `index`, `timestamp`, `merkle_root`,
+    /// `previous_hash`, `difficulty` and `nonce`. Every field carries its own
+    /// length, which is what makes the header a function of its fields: the
+    /// previous encoding pasted them together with nothing in between, so the
+    /// header (difficulty 1, nonce 23) and the header (difficulty 12, nonce 3)
+    /// hashed identically, one proof-of-work standing for two different claims
+    /// about how hard the block was.
     pub fn calculate_hash(&self) -> String {
-        let block_data = format!(
-            "{}{}{}{}{}{}",
-            self.index,
-            self.timestamp.timestamp_nanos_opt().unwrap_or(0),
-            self.merkle_root,
-            self.previous_hash,
-            self.difficulty,
-            self.nonce
-        );
-
-        let mut hasher = Sha256::new();
-        hasher.update(block_data.as_bytes());
-        hex::encode(hasher.finalize())
+        CanonicalEncoding::new(BLOCK_HASH_DOMAIN)
+            .integer(self.index)
+            .time(&self.timestamp)
+            .text(&self.merkle_root)
+            .text(&self.previous_hash)
+            .integer(self.difficulty as u64)
+            .integer(self.nonce)
+            .hash_hex()
     }
 
     /// Mine the block using Proof-of-Work
@@ -320,6 +321,23 @@ mod tests {
             !block.verify_hash(None),
             "relabelling the difficulty must break the block hash"
         );
+    }
+
+    #[test]
+    fn adjacent_header_fields_cannot_be_re_split() {
+        // Regression: the header preimage was its fields concatenated with no
+        // separator at all, so (difficulty 1, nonce 23) and (difficulty 12,
+        // nonce 3) were the same bytes, a single proof-of-work standing for two
+        // different claims about the difficulty the block was mined at.
+        let mut cheap = Block::new(1, vec![], "prev".to_string());
+        cheap.difficulty = 1;
+        cheap.nonce = 23;
+
+        let mut relabelled = cheap.clone();
+        relabelled.difficulty = 12;
+        relabelled.nonce = 3;
+
+        assert_ne!(cheap.calculate_hash(), relabelled.calculate_hash());
     }
 
     #[test]
