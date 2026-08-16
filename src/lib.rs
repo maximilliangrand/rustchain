@@ -58,6 +58,14 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result
+)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod cli;
 pub mod core;
 pub mod network;

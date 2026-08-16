@@ -37,6 +37,12 @@ pub enum BlockchainError {
     #[error("Block not found: {0}")]
     BlockNotFound(String),
 
+    /// No chain to build on. Only reachable through a hand-built [`Blockchain`]
+    /// value: every constructor and [`Blockchain::from_json`] starts from a
+    /// genesis block.
+    #[error("Chain is empty")]
+    EmptyChain,
+
     #[error("Malformed blockchain data: {0}")]
     Malformed(#[from] serde_json::Error),
 }
@@ -77,6 +83,14 @@ impl Blockchain {
     /// let blockchain = Blockchain::new();
     /// assert_eq!(blockchain.len(), 1); // Genesis block
     /// ```
+    // SAFETY: `index_chain` is fallible in exactly three ways, a repeated
+    // transaction id, a sender who cannot cover a spend, and a recipient
+    // balance that overflows. `Block::genesis()` is a compile-time constant
+    // carrying a single coinbase transaction, applied to an empty ledger, so
+    // none of the three is reachable. `genesis_indexes_without_error` pins the
+    // assumption, so a future change to the genesis block fails a test rather
+    // than aborting a running node.
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let genesis = Block::genesis();
         let (balances, spent_tx_ids) = Self::index_chain(std::slice::from_ref(&genesis))
@@ -99,11 +113,15 @@ impl Blockchain {
         blockchain
     }
 
-    /// Get the latest block in the chain
-    pub fn latest_block(&self) -> &Block {
-        self.chain.last().unwrap_or_else(|| {
-            panic!("Chain is empty - this should never happen after initialization")
-        })
+    /// Get the latest block in the chain, or `None` if the chain is empty.
+    ///
+    /// Every constructor seeds the chain with a genesis block and
+    /// [`Self::from_json`] refuses an empty one, so in practice this is always
+    /// `Some`. It still returns an `Option` rather than asserting the
+    /// invariant: `Blockchain`'s fields are public, and a node must not be
+    /// killable by a value it was merely handed.
+    pub fn latest_block(&self) -> Option<&Block> {
+        self.chain.last()
     }
 
     /// Get the chain length
@@ -334,7 +352,11 @@ impl Blockchain {
         transactions.extend(self.pending_transactions.iter().cloned());
 
         // Create and mine the block
-        let previous_hash = self.latest_block().hash.clone();
+        let previous_hash = self
+            .latest_block()
+            .ok_or(BlockchainError::EmptyChain)?
+            .hash
+            .clone();
         let mut block = Block::new(self.chain.len() as u64, transactions, previous_hash);
 
         log::info!(
@@ -384,7 +406,7 @@ impl Blockchain {
         &self,
         block: &Block,
     ) -> Result<(HashMap<String, u64>, HashSet<String>), BlockchainError> {
-        let latest = self.latest_block();
+        let latest = self.latest_block().ok_or(BlockchainError::EmptyChain)?;
 
         Self::check_block_structure(block, latest, self.difficulty, self.mining_reward)
             .map_err(BlockchainError::InvalidBlock)?;
@@ -411,13 +433,9 @@ impl Blockchain {
     /// rule block acceptance enforces, anything it skips is a rule an attacker
     /// can hand us a chain without.
     pub fn is_valid(&self) -> Result<(), BlockchainError> {
-        if self.chain.is_empty() {
-            return Err(BlockchainError::InvalidChain("Chain is empty".to_string()));
-        }
-
         // Validate genesis block: it is the root of all accounting, so it must
         // be the canonical one, not merely a well-shaped block.
-        let genesis = &self.chain[0];
+        let genesis = self.chain.first().ok_or(BlockchainError::EmptyChain)?;
         if genesis.hash != Block::genesis().hash
             || !genesis.verify_hash(None)
             || !genesis.verify_transactions()
@@ -583,6 +601,11 @@ mod tests {
         Blockchain::with_difficulty(TEST_DIFFICULTY) // Low difficulty for fast tests
     }
 
+    /// Hash of the chain tip, failing the test if the chain is empty.
+    fn tip_hash(bc: &Blockchain) -> String {
+        bc.latest_block().expect("the chain has a tip").hash.clone()
+    }
+
     /// Mine a block, failing the test if it is not accepted.
     fn mine(bc: &mut Blockchain, miner_address: &str) -> Block {
         bc.mine_pending_transactions(miner_address)
@@ -592,11 +615,7 @@ mod tests {
     /// Mine a block onto the tip *without* going through `add_block`, the way a
     /// deserialized or peer-supplied chain arrives.
     fn mined_block_on_tip(bc: &Blockchain, transactions: Vec<Transaction>) -> Block {
-        let mut block = Block::new(
-            bc.len() as u64,
-            transactions,
-            bc.latest_block().hash.clone(),
-        );
+        let mut block = Block::new(bc.len() as u64, transactions, tip_hash(bc));
         block.mine(bc.difficulty);
         block
     }
@@ -696,7 +715,7 @@ mod tests {
         let restored = Blockchain::from_json(&json).unwrap();
 
         assert_eq!(bc.len(), restored.len());
-        assert_eq!(bc.latest_block().hash, restored.latest_block().hash);
+        assert_eq!(tip_hash(&bc), tip_hash(&restored));
     }
 
     #[test]
@@ -773,7 +792,7 @@ mod tests {
         let mut bc = create_test_blockchain();
 
         let coinbase = Transaction::coinbase("attacker".to_string(), bc.mining_reward);
-        let unmined = Block::new(1, vec![coinbase], bc.latest_block().hash.clone());
+        let unmined = Block::new(1, vec![coinbase], tip_hash(&bc));
         assert!(
             !unmined.hash.starts_with("00"),
             "this fixture is only meaningful for an unmined block"
@@ -939,5 +958,34 @@ mod tests {
         assert!(bc.mine_pending_transactions("miner").is_err());
         assert_eq!(bc.pending_transactions.len(), 1, "the mempool must survive");
         assert_eq!(bc.len(), 1);
+    }
+
+    #[test]
+    fn genesis_indexes_without_error() {
+        // Pins the assumption behind the one `expect` left in `Blockchain::new`:
+        // a lone genesis block cannot fail to index. If the genesis block ever
+        // grows a second transaction or a non-coinbase spend, this fails here
+        // instead of aborting a node at startup.
+        let genesis = Block::genesis();
+        assert!(Blockchain::index_chain(std::slice::from_ref(&genesis)).is_ok());
+    }
+
+    #[test]
+    fn an_empty_chain_errors_instead_of_panicking() {
+        // `chain` is a public field, so a caller can hand us a chainless
+        // blockchain. Every path that needs a tip must report it, not abort.
+        let mut bc = create_test_blockchain();
+        bc.chain.clear();
+
+        assert!(bc.latest_block().is_none());
+        assert!(matches!(bc.is_valid(), Err(BlockchainError::EmptyChain)));
+        assert!(matches!(
+            bc.mine_pending_transactions("miner"),
+            Err(BlockchainError::EmptyChain)
+        ));
+        assert!(matches!(
+            bc.add_block(Block::genesis()),
+            Err(BlockchainError::EmptyChain)
+        ));
     }
 }

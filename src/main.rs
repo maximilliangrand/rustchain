@@ -2,6 +2,13 @@
 //!
 //! This is the main entry point for the CLI application.
 
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result
+)]
+
 use std::fs;
 use std::path::Path;
 
@@ -112,8 +119,12 @@ fn init_blockchain(difficulty: usize, output: &Path) -> Result<()> {
     let json = blockchain.to_json()?;
     fs::write(output, json)?;
 
+    let genesis = blockchain
+        .latest_block()
+        .context("a freshly initialized blockchain has a genesis block")?;
+
     println!("✓ Blockchain initialized!");
-    println!("  Genesis block hash: {}", blockchain.latest_block().hash);
+    println!("  Genesis block hash: {}", genesis.hash);
     println!("  Difficulty: {}", difficulty);
     println!("  Saved to: {}", output.display());
 
@@ -318,9 +329,14 @@ fn show_info(bc_path: &Path, verbose: bool) -> Result<()> {
     );
     println!("───────────────────────────────────────────────────────────────");
     println!("  Latest block:");
-    println!("    Index:  {}", blockchain.latest_block().index);
-    println!("    Hash:   {}", blockchain.latest_block().hash);
-    println!("    Time:   {}", blockchain.latest_block().timestamp);
+    match blockchain.latest_block() {
+        Some(latest) => {
+            println!("    Index:  {}", latest.index);
+            println!("    Hash:   {}", latest.hash);
+            println!("    Time:   {}", latest.timestamp);
+        }
+        None => println!("    (none - the chain is empty)"),
+    }
     println!("═══════════════════════════════════════════════════════════════");
 
     if verbose {
@@ -470,7 +486,13 @@ fn run_demo(difficulty: usize) -> Result<()> {
     println!("1. Creating blockchain with difficulty {}...", difficulty);
     let mut blockchain = Blockchain::with_difficulty(difficulty);
     println!("   ✓ Genesis block created");
-    println!("   Hash: {}", blockchain.latest_block().hash);
+    println!(
+        "   Hash: {}",
+        blockchain
+            .latest_block()
+            .context("a freshly created blockchain has a genesis block")?
+            .hash
+    );
     println!();
 
     // Create wallets

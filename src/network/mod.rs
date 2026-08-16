@@ -274,7 +274,9 @@ impl Node {
         match message {
             Message::GetLatestBlock => {
                 let bc = blockchain.read().await;
-                Some(Message::LatestBlock(bc.latest_block().clone()))
+                // A node with no chain simply has nothing to answer with; the
+                // peer gets silence rather than a crash.
+                bc.latest_block().cloned().map(Message::LatestBlock)
             }
 
             Message::GetBlockchain => {

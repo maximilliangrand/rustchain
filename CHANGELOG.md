@@ -21,11 +21,19 @@ enforces its own quality bar on every push.
 - A declared minimum supported Rust version (`rust-version = "1.90"`).
 - Merkle inclusion proofs, and a spent-transaction-id index consulted by both
   the mempool and block validation.
+- Crate-level `deny(clippy::unwrap_used, expect_used, panic, unwrap_in_result)`
+  on both the library and the binary, so the compiler now enforces that no
+  code path reachable from a peer message, a stored chain or a wallet file can
+  abort the process. Tests keep an explicit `cfg(test)` allow.
+- `BlockchainError::EmptyChain`, for the paths that need a chain tip.
 
 ### Changed
 
 - Applied `rustfmt` to the whole tree once, so the new format gate starts from
   a clean baseline and later diffs carry no formatting noise.
+- `Blockchain::latest_block` returns `Option<&Block>` instead of panicking on
+  an empty chain. `chain` is a public field, so a chainless `Blockchain` is a
+  value a caller can hand us; answering `None` beats aborting the node.
 - Block application is a single function shared by block acceptance and
   whole-chain validation, working over a balance index derived from the chain
   instead of read from disk.
