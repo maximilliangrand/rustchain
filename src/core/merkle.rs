@@ -22,7 +22,8 @@
 //! in a block without downloading all transactions (SPV - Simple Payment Verification)
 
 use super::hashing::{
-    CanonicalEncoding, MERKLE_LEAF_DOMAIN, MERKLE_NODE_DOMAIN, MERKLE_PADDING_DOMAIN,
+    CanonicalEncoding, MERKLE_EMPTY_DOMAIN, MERKLE_LEAF_DOMAIN, MERKLE_NODE_DOMAIN,
+    MERKLE_PADDING_DOMAIN,
 };
 
 /// A Merkle Tree for efficient transaction verification
@@ -61,7 +62,7 @@ impl MerkleTree {
     pub fn new(hashes: Vec<String>) -> Self {
         if hashes.is_empty() {
             return Self {
-                root: Self::hash_leaf("empty"),
+                root: Self::empty_root(),
                 levels: vec![],
                 leaf_count: 0,
             };
@@ -97,6 +98,12 @@ impl MerkleTree {
             levels,
             leaf_count,
         }
+    }
+
+    /// The root of an empty tree, in its own domain so it can never equal a
+    /// leaf, an internal node or the padding sentinel.
+    fn empty_root() -> String {
+        CanonicalEncoding::new(MERKLE_EMPTY_DOMAIN).hash_hex()
     }
 
     /// Hash a leaf node in the leaf domain
@@ -310,6 +317,18 @@ mod tests {
 
         assert!(tree.generate_proof(2).is_none());
         assert!(MerkleTree::new(vec![]).generate_proof(0).is_none());
+    }
+
+    #[test]
+    fn the_empty_root_has_its_own_domain() {
+        // The empty-tree root used to reuse the leaf domain, hashing the leaf of
+        // the literal "empty". In its own domain it can equal no leaf, so an
+        // empty tree cannot be confused with a one-transaction tree.
+        let empty = MerkleTree::new(vec![]).root;
+
+        assert_ne!(empty, MerkleTree::hash_leaf("empty"));
+        assert_ne!(empty, MerkleTree::hash_leaf(""));
+        assert_ne!(empty, MerkleTree::padding_node());
     }
 
     #[test]

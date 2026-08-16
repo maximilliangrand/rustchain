@@ -4,7 +4,7 @@
 //! - Node discovery and connection
 //! - Block and transaction propagation
 //! - Chain synchronization
-//! - Consensus (longest chain rule)
+//! - Consensus (heaviest-work chain rule)
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -31,6 +31,13 @@ const MAX_TXS_PER_BLOCK: usize = 1000;
 
 /// Maximum number of simultaneous inbound connections
 const MAX_INBOUND_CONNECTIONS: usize = 64;
+
+/// Largest number of peer addresses the node will hold.
+///
+/// Every recorded address is a host this node may later dial, so the table is
+/// capped: a peer cannot grow it without bound, and an unbounded table is both a
+/// memory cost and a way to crowd honest peers out.
+const MAX_PEERS: usize = 1024;
 
 /// How long a connection may sit idle before it is dropped
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -387,8 +394,10 @@ impl Node {
                 );
 
                 // Remember the peer, otherwise propagation is one-way: we would
-                // only ever push to peers named on our own command line.
-                peers.write().await.insert(listen_address);
+                // only ever push to peers named on our own command line. This is
+                // the counterparty's own claimed address, validated and bounded
+                // like any other; it is recorded, not authenticated.
+                Self::record_peer(peers, &listen_address).await;
 
                 // A peer that announces a longer chain is a fork to resolve
                 // now, not whenever somebody next mines: a node joining a
@@ -447,14 +456,14 @@ impl Node {
         }
     }
 
-    /// Pull every known peer's chain and adopt the longest valid one.
+    /// Pull every known peer's chain and adopt the heaviest valid one.
     ///
     /// Reconvergence needs a pull as well as a push. Broadcasting a block tells
     /// a peer that a better chain exists but not what is in it, so a node that
     /// forked more than one block back can never catch up on gossip alone. This
     /// closes the gap, and [`Blockchain::replace_chain`], not this function,
-    /// decides: a candidate is adopted only if it is longer, rooted in our own
-    /// genesis, and valid block for block.
+    /// decides: a candidate is adopted only if it is rooted in our own genesis,
+    /// valid block for block, and carries strictly more work than what we hold.
     async fn reconverge(
         blockchain: &Arc<RwLock<Blockchain>>,
         peers: &Arc<RwLock<HashSet<String>>>,
@@ -482,25 +491,26 @@ impl Node {
 
             // The whole chain is in hand before the write lock is taken: a peer
             // that stalls mid-transfer must not freeze this node's own mining.
+            // `replace_chain`, not a length test here, decides: it validates the
+            // candidate and adopts it only if it carries strictly more work, so
+            // a longer-but-lighter chain is refused rather than raced onto.
             let adopted = {
                 let mut bc = blockchain.write().await;
-                if offered.len() <= bc.len() {
-                    false
-                } else {
-                    let offered_len = offered.len();
-                    match bc.replace_chain(offered) {
-                        Ok(()) => {
-                            log::info!(
-                                "Reconverged on the chain of peer {} ({} blocks)",
-                                peer,
-                                offered_len
-                            );
-                            true
-                        }
-                        Err(e) => {
-                            log::warn!("Refused the chain offered by {}: {}", peer, e);
-                            false
-                        }
+                let offered_len = offered.len();
+                match bc.replace_chain(offered) {
+                    Ok(()) => {
+                        log::info!(
+                            "Reconverged on the chain of peer {} ({} blocks)",
+                            peer,
+                            offered_len
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        // A chain no heavier than ours is the common case, not a
+                        // fault, so this stays at debug.
+                        log::debug!("Did not adopt the chain offered by {}: {}", peer, e);
+                        false
                     }
                 }
             };
@@ -547,6 +557,55 @@ impl Node {
         }
     }
 
+    /// Record a peer address, if it is well-formed and there is room.
+    ///
+    /// Addresses reach us from untrusted handshakes, and every recorded address
+    /// is a host this node may later dial, so an unparseable string is dropped
+    /// and the table is capped at [`MAX_PEERS`]. This keeps a peer from steering
+    /// the node at an arbitrary or malformed target and from growing the table
+    /// without bound. It does not authenticate the address: see the eclipse and
+    /// SSRF notes in `docs/THREAT-MODEL.md`.
+    async fn record_peer(peers: &Arc<RwLock<HashSet<String>>>, addr: &str) -> bool {
+        if addr.parse::<std::net::SocketAddr>().is_err() {
+            log::warn!(
+                "Ignoring a peer address that is not a socket address: {}",
+                addr
+            );
+            return false;
+        }
+
+        let mut set = peers.write().await;
+        if set.contains(addr) {
+            return false;
+        }
+        if set.len() >= MAX_PEERS {
+            log::warn!(
+                "Peer table is full ({} entries); dropping {}",
+                MAX_PEERS,
+                addr
+            );
+            return false;
+        }
+        set.insert(addr.to_string())
+    }
+
+    /// Read one message from `socket`, failing if the peer does not answer in
+    /// time.
+    ///
+    /// Every read this node makes after sending a request is bounded by
+    /// [`REQUEST_TIMEOUT`]: a peer that accepts the connection and then goes
+    /// silent must not pin the task, which may be holding up a handshake.
+    async fn read_with_timeout(
+        socket: &mut TcpStream,
+        peer_addr: &str,
+        what: &str,
+    ) -> WireResult<Option<Message>> {
+        match tokio::time::timeout(REQUEST_TIMEOUT, read_message(socket)).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("peer {} did not answer the {} in time", peer_addr, what).into()),
+        }
+    }
+
     /// Connect to a peer
     pub async fn connect_to_peer(&self, peer_addr: &str) -> WireResult<()> {
         let mut socket = TcpStream::connect(peer_addr).await?;
@@ -554,21 +613,28 @@ impl Node {
         // Send version message
         let version_msg = self.version_message().await;
         write_message(&mut socket, &version_msg).await?;
-        let their_version = read_message(&mut socket).await?;
+        let their_version = Self::read_with_timeout(&mut socket, peer_addr, "handshake").await?;
 
-        // Add to peers
-        self.peers.write().await.insert(peer_addr.to_string());
+        // Record the peer we explicitly dialled. It is validated and bounded
+        // like any other, but unlike an advertised address it is one the
+        // operator chose to trust.
+        Self::record_peer(&self.peers, peer_addr).await;
         log::info!("Connected to peer: {}", peer_addr);
 
-        // Learn about the peer's peers
+        // Ask for the peer's peers, but do not add them to our own table. An
+        // address a peer merely advertises is a host we would then dial, so
+        // auto-dialling it turns any peer into a way to point this node at an
+        // arbitrary target. Discovery is deliberately limited to explicitly
+        // configured peers and to the peers we are directly handshaking with.
         write_message(&mut socket, &Message::GetPeers).await?;
-        if let Some(Message::Peers(known)) = read_message(&mut socket).await? {
-            let mut peers = self.peers.write().await;
-            for peer in known {
-                if peer != self.address {
-                    peers.insert(peer);
-                }
-            }
+        if let Some(Message::Peers(known)) =
+            Self::read_with_timeout(&mut socket, peer_addr, "peer list").await?
+        {
+            log::debug!(
+                "Peer {} advertised {} addresses (not auto-dialled)",
+                peer_addr,
+                known.len()
+            );
         }
 
         // The handshake already told us who is ahead, so a node joining a
@@ -596,8 +662,8 @@ impl Node {
 
     /// Synchronize blockchain with a peer
     ///
-    /// The peer's chain replaces ours only if it is longer *and* valid; a
-    /// shorter or malformed offer leaves this node exactly as it was.
+    /// The peer's chain replaces ours only if it validates *and* carries more
+    /// work; a lighter or malformed offer leaves this node exactly as it was.
     pub async fn sync_with_peer(&self, peer_addr: &str) -> WireResult<()> {
         let Some(chain) = Self::request_chain(peer_addr).await? else {
             return Ok(());
@@ -605,21 +671,23 @@ impl Node {
 
         let replaced = {
             let mut bc = self.blockchain.write().await;
-            if chain.len() > bc.len() {
-                log::info!(
-                    "Received longer chain ({} vs {}), replacing...",
-                    chain.len(),
-                    bc.len()
-                );
-                match bc.replace_chain(chain) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        log::error!("Failed to replace chain: {}", e);
-                        false
-                    }
+            let offered_len = chain.len();
+            // `replace_chain` adopts the offer only if it validates and carries
+            // strictly more work than what we hold, so the comparison is by
+            // work, not by length.
+            match bc.replace_chain(chain) {
+                Ok(()) => {
+                    log::info!(
+                        "Adopted a heavier chain from {} ({} blocks)",
+                        peer_addr,
+                        offered_len
+                    );
+                    true
                 }
-            } else {
-                false
+                Err(e) => {
+                    log::debug!("Did not adopt the chain from {}: {}", peer_addr, e);
+                    false
+                }
             }
         };
 

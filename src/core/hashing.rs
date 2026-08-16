@@ -38,6 +38,13 @@ pub(crate) const BLOCK_HASH_DOMAIN: &str = "rustchain.block.header.v1";
 /// Domain tag for a Merkle leaf.
 pub(crate) const MERKLE_LEAF_DOMAIN: &str = "rustchain.merkle.leaf.v1";
 
+/// Domain tag for the root of an empty Merkle tree.
+///
+/// In its own domain so the empty-tree root can never equal a leaf, an internal
+/// node or the padding sentinel: reusing the leaf domain let the empty root
+/// collide with the leaf of a chosen value.
+pub(crate) const MERKLE_EMPTY_DOMAIN: &str = "rustchain.merkle.empty.v1";
+
 /// Domain tag for a Merkle internal node.
 pub(crate) const MERKLE_NODE_DOMAIN: &str = "rustchain.merkle.node.v1";
 

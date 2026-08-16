@@ -13,8 +13,7 @@ use std::path::PathBuf;
 /// RustChain - A blockchain implementation in Rust
 #[derive(Parser)]
 #[command(name = "rustchain")]
-#[command(author = "Your Name")]
-#[command(version = "0.1.0")]
+#[command(author, version)]
 #[command(about = "A blockchain implementation from scratch in Rust", long_about = None)]
 pub struct Cli {
     /// Sets a custom config file
