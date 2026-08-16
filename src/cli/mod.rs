@@ -33,7 +33,7 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize a new blockchain
     Init {
-        /// Mining difficulty (number of leading zeros)
+        /// Starting mining difficulty (number of leading zeros); retargets from there
         #[arg(short, long, default_value = "4")]
         difficulty: usize,
 

@@ -6,6 +6,7 @@
 //! - Transactions: List of transactions included in the block
 //! - Previous hash: Hash of the previous block (creates the chain)
 //! - Merkle root: Root hash of all transactions for efficient verification
+//! - Difficulty: The proof-of-work difficulty this block was mined at
 //! - Nonce: Proof-of-work solution
 //! - Hash: The block's own hash
 
@@ -29,6 +30,14 @@ pub struct Block {
     pub previous_hash: String,
     /// Merkle root of all transactions
     pub merkle_root: String,
+    /// Proof-of-work difficulty this block claims to have been mined at.
+    ///
+    /// Part of the hash preimage, so it cannot be relabelled after mining, and
+    /// checked against the difficulty the chain rules demand at this height,
+    /// a block does not get to choose how hard it was.
+    ///
+    /// Zero on an unmined block, including the genesis block.
+    pub difficulty: usize,
     /// Proof-of-work nonce
     pub nonce: u64,
     /// This block's hash
@@ -61,6 +70,7 @@ impl Block {
             transactions,
             previous_hash,
             merkle_root: merkle_tree.root,
+            difficulty: 0,
             nonce: 0,
             hash: String::new(),
         };
@@ -91,14 +101,16 @@ impl Block {
 
     /// Calculate the hash of this block
     ///
-    /// The hash is computed from: index + timestamp + merkle_root + previous_hash + nonce
+    /// The hash is computed from:
+    /// index + timestamp + merkle_root + previous_hash + difficulty + nonce
     pub fn calculate_hash(&self) -> String {
         let block_data = format!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             self.index,
             self.timestamp.timestamp_nanos_opt().unwrap_or(0),
             self.merkle_root,
             self.previous_hash,
+            self.difficulty,
             self.nonce
         );
 
@@ -110,6 +122,10 @@ impl Block {
     /// Mine the block using Proof-of-Work
     ///
     /// Finds a nonce such that the block hash starts with `difficulty` zeros
+    ///
+    /// The difficulty is recorded on the block before the search starts, so it
+    /// is covered by the proof-of-work it describes: a mined block cannot later
+    /// be relabelled with a cheaper difficulty without invalidating its hash.
     ///
     /// # Arguments
     /// * `difficulty` - Number of leading zeros required in the hash
@@ -127,6 +143,8 @@ impl Block {
     /// assert!(block.hash.starts_with("00"));
     /// ```
     pub fn mine(&mut self, difficulty: usize) -> u64 {
+        self.difficulty = difficulty;
+
         let target = "0".repeat(difficulty);
         let mut iterations = 0u64;
 
@@ -270,6 +288,33 @@ mod tests {
 
         assert!(block.hash.starts_with("00"));
         assert!(iterations > 0);
+    }
+
+    #[test]
+    fn mining_records_the_difficulty_it_used() {
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        assert_eq!(block.difficulty, 0, "an unmined block claims no work");
+
+        block.mine(2);
+
+        assert_eq!(block.difficulty, 2);
+    }
+
+    #[test]
+    fn the_claimed_difficulty_is_committed_to_the_hash() {
+        // The claimed difficulty is only meaningful if it is covered by the
+        // proof-of-work: otherwise a block mined at difficulty 1 could be
+        // relabelled as difficulty 5 and pass a chain that demands 5.
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        block.mine(2);
+        assert!(block.verify_hash(Some(2)));
+
+        block.difficulty = 5;
+
+        assert!(
+            !block.verify_hash(None),
+            "relabelling the difficulty must break the block hash"
+        );
     }
 
     #[test]

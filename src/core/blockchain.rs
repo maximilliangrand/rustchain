@@ -13,8 +13,26 @@ use thiserror::Error;
 use super::block::Block;
 use super::transaction::Transaction;
 
-/// Mining difficulty (number of leading zeros required)
+/// Starting mining difficulty (number of leading zeros required)
 pub const DEFAULT_DIFFICULTY: usize = 4;
+
+/// How long a block is meant to take, in seconds
+pub const TARGET_BLOCK_TIME_SECS: i64 = 60;
+
+/// Number of blocks between difficulty retargets
+pub const RETARGET_INTERVAL: u64 = 10;
+
+/// Difficulty floor. At zero a block needs no proof-of-work at all, so the
+/// chain would be free to rewrite.
+pub const MIN_DIFFICULTY: usize = 1;
+
+/// Difficulty ceiling. A hex hash has 64 digits, and long before that a chain
+/// is unmineable; the cap keeps a runaway retarget from bricking the node.
+pub const MAX_DIFFICULTY: usize = 32;
+
+/// How far the observed timespan may miss the target before the difficulty
+/// moves: twice too fast raises it, twice too slow lowers it.
+const RETARGET_TOLERANCE: i64 = 2;
 
 /// Mining reward
 pub const MINING_REWARD: u64 = 50;
@@ -52,7 +70,10 @@ pub enum BlockchainError {
 pub struct Blockchain {
     /// The chain of blocks
     pub chain: Vec<Block>,
-    /// Current mining difficulty
+    /// Difficulty the chain starts at.
+    ///
+    /// Only the first mined block uses it directly; from there difficulty is
+    /// derived from the blocks themselves by [`Blockchain::next_difficulty`].
     pub difficulty: usize,
     /// Pending transactions (mempool)
     #[serde(default)]
@@ -139,6 +160,83 @@ impl Blockchain {
         *self.balances.get(address).unwrap_or(&0)
     }
 
+    /// The difficulty the next block mined on this chain must carry.
+    pub fn next_difficulty(&self) -> usize {
+        Self::required_difficulty(&self.chain, self.difficulty)
+    }
+
+    /// The difficulty a block extending `chain` is required to claim.
+    ///
+    /// Difficulty is a property of the chain, not of node configuration: every
+    /// node derives the same number from the same blocks, which is what makes a
+    /// block's claimed difficulty checkable instead of merely reported.
+    ///
+    /// The rule is a moving-window retarget. Every [`RETARGET_INTERVAL`] blocks
+    /// the wall-clock span of the window that just closed is compared with the
+    /// span it should have taken, [`TARGET_BLOCK_TIME_SECS`] per block
+    /// interval, and the difficulty moves one step if the two differ by more
+    /// than a factor of [`RETARGET_TOLERANCE`]. In between retargets a block
+    /// simply inherits its parent's difficulty.
+    ///
+    /// Difficulty counts leading hex zeros, so a single step is already a
+    /// factor of 16 in work. That quantisation *is* the clamp, and it is
+    /// stricter than Bitcoin's 4x limit: one retarget moves the difficulty by
+    /// at most one step, and never outside [`MIN_DIFFICULTY`]..=
+    /// [`MAX_DIFFICULTY`].
+    ///
+    /// The genesis block is excluded from every window: its timestamp is a
+    /// fixed constant chosen so all nodes agree on it, not a mining time.
+    fn required_difficulty(chain: &[Block], base_difficulty: usize) -> usize {
+        let clamp = |difficulty: usize| difficulty.clamp(MIN_DIFFICULTY, MAX_DIFFICULTY);
+
+        let Some(parent) = chain.last() else {
+            return clamp(base_difficulty);
+        };
+
+        // Height of the block being placed on top of `chain`.
+        let height = chain.len() as u64;
+
+        // The first mined block has no mined ancestor to inherit from.
+        if height == 1 {
+            return clamp(base_difficulty);
+        }
+
+        if !height.is_multiple_of(RETARGET_INTERVAL) {
+            return clamp(parent.difficulty);
+        }
+
+        // The window is the block interval that just closed, with genesis
+        // excluded, so the very first window is one interval shorter than the
+        // rest. Measuring the expected span from the intervals actually
+        // covered keeps the comparison honest either way.
+        let window_start = (height - RETARGET_INTERVAL).max(1) as usize;
+        let Some(first) = chain.get(window_start) else {
+            return clamp(parent.difficulty);
+        };
+
+        let intervals = height.saturating_sub(window_start as u64 + 1) as i64;
+        let expected = intervals.saturating_mul(TARGET_BLOCK_TIME_SECS);
+        if expected <= 0 {
+            return clamp(parent.difficulty);
+        }
+
+        // Timestamps are non-decreasing along a valid chain, but `chain` may be
+        // untrusted input, so a negative span is floored rather than trusted.
+        let actual = (parent.timestamp - first.timestamp).num_seconds().max(0);
+
+        let retargeted = if actual.saturating_mul(RETARGET_TOLERANCE) < expected {
+            // Blocks arrived too fast: make them harder.
+            parent.difficulty.saturating_add(1)
+        } else if actual > expected.saturating_mul(RETARGET_TOLERANCE) {
+            // Blocks arrived too slowly: make them easier.
+            parent.difficulty.saturating_sub(1)
+        } else {
+            parent.difficulty
+        };
+
+        clamp(retargeted)
+    }
+
     /// Apply a block's transactions to a balance set and a spent-id set.
     ///
     /// This is the single definition of what a block does to the ledger, shared
@@ -204,7 +302,7 @@ impl Blockchain {
     fn check_block_structure(
         block: &Block,
         previous: &Block,
-        difficulty: usize,
+        expected_difficulty: usize,
         mining_reward: u64,
     ) -> Result<(), String> {
         if block.index != previous.index + 1 {
@@ -219,8 +317,21 @@ impl Blockchain {
             return Err("Previous hash mismatch".to_string());
         }
 
-        // Recomputes the hash and checks the proof-of-work in one step.
-        if !block.verify_hash(Some(difficulty)) {
+        // The block's own claim about how hard it was must be the number the
+        // retarget rules produce at this height. Without this check the
+        // difficulty is whatever the block says it is, and retargeting becomes
+        // advisory: a miner would simply declare difficulty 1 forever.
+        if block.difficulty != expected_difficulty {
+            return Err(format!(
+                "Invalid difficulty: expected {}, got {}",
+                expected_difficulty, block.difficulty
+            ));
+        }
+
+        // Recomputes the hash and checks the proof-of-work in one step. The
+        // claimed difficulty is part of the preimage, so this also pins the
+        // claim to the work that was actually done.
+        if !block.verify_hash(Some(expected_difficulty)) {
             return Err("Block hash doesn't meet difficulty requirement".to_string());
         }
 
@@ -359,14 +470,19 @@ impl Blockchain {
             .clone();
         let mut block = Block::new(self.chain.len() as u64, transactions, previous_hash);
 
+        // Mine at the difficulty the chain rules demand at this height, not at
+        // a node-local setting, anything else produces a block our own peers
+        // would refuse.
+        let difficulty = self.next_difficulty();
+
         log::info!(
             "Mining block {} with {} transactions (difficulty: {})...",
             block.index,
             block.transaction_count(),
-            self.difficulty
+            difficulty
         );
 
-        let iterations = block.mine(self.difficulty);
+        let iterations = block.mine(difficulty);
         log::info!("Block mined in {} iterations", iterations);
 
         // Add block to chain
@@ -408,7 +524,7 @@ impl Blockchain {
     ) -> Result<(HashMap<String, u64>, HashSet<String>), BlockchainError> {
         let latest = self.latest_block().ok_or(BlockchainError::EmptyChain)?;
 
-        Self::check_block_structure(block, latest, self.difficulty, self.mining_reward)
+        Self::check_block_structure(block, latest, self.next_difficulty(), self.mining_reward)
             .map_err(BlockchainError::InvalidBlock)?;
 
         // Apply the block to a copy of the ledger. This is where a block that
@@ -426,7 +542,8 @@ impl Blockchain {
     /// Checks that:
     /// 1. The genesis block is *the* genesis block
     /// 2. Each block correctly references the previous
-    /// 3. All hashes are valid and carry the required proof-of-work
+    /// 3. All hashes are valid and carry the proof-of-work the retarget rules
+    ///    demand at their height
     /// 4. All transactions are valid, unique, and affordable
     ///
     /// This is what `rustchain validate` reports, so it has to enforce every
@@ -445,12 +562,14 @@ impl Blockchain {
             ));
         }
 
-        // Validate rest of chain
+        // Validate rest of chain. The required difficulty is re-derived from
+        // the prefix each block was built on, so a chain cannot smuggle in an
+        // easy block by claiming a difficulty its own history doesn't allow.
         for i in 1..self.chain.len() {
             Self::check_block_structure(
                 &self.chain[i],
                 &self.chain[i - 1],
-                self.difficulty,
+                Self::required_difficulty(&self.chain[..i], self.difficulty),
                 self.mining_reward,
             )
             .map_err(|e| BlockchainError::InvalidChain(format!("Block {}: {}", i, e)))?;
@@ -616,8 +735,36 @@ mod tests {
     /// deserialized or peer-supplied chain arrives.
     fn mined_block_on_tip(bc: &Blockchain, transactions: Vec<Transaction>) -> Block {
         let mut block = Block::new(bc.len() as u64, transactions, tip_hash(bc));
-        block.mine(bc.difficulty);
+        block.mine(bc.next_difficulty());
         block
+    }
+
+    /// A chain of `blocks` blocks on top of genesis, spaced `spacing` seconds
+    /// apart and all claiming `difficulty`.
+    ///
+    /// Only the fields the retarget reads, timestamp and difficulty, are
+    /// meaningful; the blocks are never mined, which keeps the timing tests
+    /// deterministic instead of dependent on how fast the machine hashes.
+    fn timed_chain(blocks: u64, spacing: i64, difficulty: usize) -> Vec<Block> {
+        let mut chain = vec![Block::genesis()];
+
+        for index in 1..=blocks {
+            let mut block = Block::new(index, Vec::new(), "prev".to_string());
+            block.difficulty = difficulty;
+            block.timestamp =
+                chrono::DateTime::UNIX_EPOCH + chrono::Duration::seconds(index as i64 * spacing);
+            chain.push(block);
+        }
+
+        chain
+    }
+
+    /// The difficulty demanded of the block that closes the first retarget
+    /// window, given blocks arriving `spacing` seconds apart.
+    fn difficulty_after_first_window(spacing: i64, difficulty: usize) -> usize {
+        let chain = timed_chain(RETARGET_INTERVAL - 1, spacing, difficulty);
+        assert_eq!(chain.len() as u64, RETARGET_INTERVAL);
+        Blockchain::required_difficulty(&chain, difficulty)
     }
 
     #[test]
@@ -987,5 +1134,151 @@ mod tests {
             bc.add_block(Block::genesis()),
             Err(BlockchainError::EmptyChain)
         ));
+    }
+
+    #[test]
+    fn difficulty_is_inherited_between_retargets() {
+        // Only a block at a retarget boundary may change the difficulty, no
+        // matter how fast the blocks in between arrive.
+        let chain = timed_chain(RETARGET_INTERVAL - 2, 1, 7);
+
+        assert!(!(chain.len() as u64).is_multiple_of(RETARGET_INTERVAL));
+        assert_eq!(Blockchain::required_difficulty(&chain, TEST_DIFFICULTY), 7);
+    }
+
+    #[test]
+    fn difficulty_rises_when_blocks_come_too_fast() {
+        // A tenth of the target block time per block: far too fast.
+        let spacing = TARGET_BLOCK_TIME_SECS / 10;
+
+        assert_eq!(
+            difficulty_after_first_window(spacing, TEST_DIFFICULTY),
+            TEST_DIFFICULTY + 1
+        );
+    }
+
+    #[test]
+    fn difficulty_falls_when_blocks_come_too_slow() {
+        // Ten times the target block time per block: far too slow.
+        let spacing = TARGET_BLOCK_TIME_SECS * 10;
+
+        assert_eq!(
+            difficulty_after_first_window(spacing, TEST_DIFFICULTY),
+            TEST_DIFFICULTY - 1
+        );
+    }
+
+    #[test]
+    fn difficulty_holds_when_blocks_arrive_on_target() {
+        // The steady state, measured on a full window rather than the shorter
+        // first one: on-target blocks must not make the difficulty drift.
+        let chain = timed_chain(
+            RETARGET_INTERVAL * 2 - 1,
+            TARGET_BLOCK_TIME_SECS,
+            TEST_DIFFICULTY,
+        );
+
+        assert_eq!(chain.len() as u64, RETARGET_INTERVAL * 2);
+        assert_eq!(
+            Blockchain::required_difficulty(&chain, TEST_DIFFICULTY),
+            TEST_DIFFICULTY
+        );
+    }
+
+    #[test]
+    fn a_retarget_moves_the_difficulty_by_at_most_one_step() {
+        // Every block sharing a timestamp is the most extreme "too fast" a
+        // chain can express. One leading zero is already a factor of 16 in
+        // work, so the response is capped at a single step in either
+        // direction.
+        assert_eq!(
+            difficulty_after_first_window(0, TEST_DIFFICULTY),
+            TEST_DIFFICULTY + 1
+        );
+        assert_eq!(
+            difficulty_after_first_window(TARGET_BLOCK_TIME_SECS * 1_000, TEST_DIFFICULTY),
+            TEST_DIFFICULTY - 1
+        );
+    }
+
+    #[test]
+    fn difficulty_never_falls_below_the_floor() {
+        // At difficulty 0 a block needs no work at all, so however slow the
+        // chain gets, the retarget stops at the floor.
+        let spacing = TARGET_BLOCK_TIME_SECS * 1_000;
+
+        assert_eq!(
+            difficulty_after_first_window(spacing, MIN_DIFFICULTY),
+            MIN_DIFFICULTY
+        );
+    }
+
+    #[test]
+    fn mining_retargets_at_the_interval_boundary() {
+        // Blocks mined back to back arrive far faster than the target, so the
+        // block that closes the first window has to be harder than the ones
+        // before it, and the chain that demanded that must then accept it.
+        let mut bc = Blockchain::with_difficulty(MIN_DIFFICULTY);
+
+        for _ in 1..RETARGET_INTERVAL {
+            mine(&mut bc, "miner");
+        }
+        assert!(
+            bc.chain[1..].iter().all(|b| b.difficulty == MIN_DIFFICULTY),
+            "no retarget before the interval closes"
+        );
+
+        let retargeted = mine(&mut bc, "miner");
+
+        assert_eq!(retargeted.index, RETARGET_INTERVAL);
+        assert_eq!(retargeted.difficulty, MIN_DIFFICULTY + 1);
+        assert!(bc.is_valid().is_ok());
+    }
+
+    #[test]
+    fn a_block_claiming_the_wrong_difficulty_is_rejected() {
+        let mut bc = create_test_blockchain();
+        assert_eq!(bc.next_difficulty(), TEST_DIFFICULTY);
+
+        fn mined_at(bc: &Blockchain, difficulty: usize) -> Block {
+            let coinbase = Transaction::coinbase("miner".to_string(), bc.mining_reward);
+            let mut block = Block::new(1, vec![coinbase], tip_hash(bc));
+            block.mine(difficulty);
+            block
+        }
+
+        let cheap = mined_at(&bc, TEST_DIFFICULTY - 1);
+        assert!(
+            bc.add_block(cheap).is_err(),
+            "a block claiming less work than the rules demand is refused"
+        );
+
+        let overclaimed = mined_at(&bc, TEST_DIFFICULTY + 1);
+        assert!(
+            bc.add_block(overclaimed).is_err(),
+            "so is one claiming a difficulty the rules never set"
+        );
+
+        assert_eq!(bc.len(), 1);
+    }
+
+    #[test]
+    fn is_valid_rejects_a_chain_that_dodges_a_retarget() {
+        // Regression cover for the whole point of validating the claim: an
+        // attacker re-mines the retargeted block at the old, cheap difficulty.
+        // The proof-of-work is internally consistent, so only re-deriving the
+        // required difficulty from the chain catches it.
+        let mut bc = Blockchain::with_difficulty(MIN_DIFFICULTY);
+        for _ in 1..=RETARGET_INTERVAL {
+            mine(&mut bc, "miner");
+        }
+
+        let boundary = RETARGET_INTERVAL as usize;
+        assert_eq!(bc.chain[boundary].difficulty, MIN_DIFFICULTY + 1);
+
+        bc.chain[boundary].mine(MIN_DIFFICULTY);
+        assert!(bc.chain[boundary].verify_hash(Some(MIN_DIFFICULTY)));
+
+        assert!(bc.is_valid().is_err());
     }
 }

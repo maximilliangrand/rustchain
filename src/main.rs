@@ -110,7 +110,7 @@ fn short(value: &str, chars: usize) -> &str {
 /// Initialize a new blockchain
 fn init_blockchain(difficulty: usize, output: &Path) -> Result<()> {
     info!(
-        "Initializing new blockchain with difficulty {}...",
+        "Initializing new blockchain with starting difficulty {}...",
         difficulty
     );
 
@@ -125,7 +125,7 @@ fn init_blockchain(difficulty: usize, output: &Path) -> Result<()> {
 
     println!("✓ Blockchain initialized!");
     println!("  Genesis block hash: {}", genesis.hash);
-    println!("  Difficulty: {}", difficulty);
+    println!("  Starting difficulty: {}", difficulty);
     println!("  Saved to: {}", output.display());
 
     Ok(())
@@ -281,7 +281,7 @@ fn mine_block(address: &str, bc_path: &Path) -> Result<()> {
     let mut blockchain = Blockchain::from_json(&bc_json)?;
 
     println!("Mining new block...");
-    println!("  Difficulty: {}", blockchain.difficulty);
+    println!("  Difficulty: {}", blockchain.next_difficulty());
     println!(
         "  Pending transactions: {}",
         blockchain.pending_transactions.len()
@@ -320,7 +320,7 @@ fn show_info(bc_path: &Path, verbose: bool) -> Result<()> {
     println!("                      BLOCKCHAIN INFO");
     println!("═══════════════════════════════════════════════════════════════");
     println!("  Chain length:        {} blocks", blockchain.len());
-    println!("  Difficulty:          {}", blockchain.difficulty);
+    println!("  Next difficulty:     {}", blockchain.next_difficulty());
     println!("  Total transactions:  {}", blockchain.total_transactions());
     println!("  Total supply:        {} coins", blockchain.total_supply());
     println!(

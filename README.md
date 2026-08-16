@@ -102,10 +102,10 @@ This will:
 #### Initialize a Blockchain
 
 ```bash
-# Create a new blockchain with default difficulty (4)
+# Create a new blockchain with the default starting difficulty (4)
 cargo run -- init
 
-# Create with custom difficulty
+# Create with a custom starting difficulty
 cargo run -- init --difficulty 3 --output my_chain.json
 ```
 
@@ -225,12 +225,34 @@ With difficulty `d`, the hash must start with `d` zeros:
 - Difficulty 4: `0000xxxx...` (~65,536 attempts)
 - Difficulty 8: `00000000...` (~4.3 billion attempts)
 
+### Difficulty Retargeting
+
+Difficulty is a property of the chain, not a node setting: every node derives the same
+number from the same blocks, which is what makes a block's claimed difficulty checkable.
+
+- Every `RETARGET_INTERVAL` (10) blocks, the wall-clock span of the window that just
+  closed is compared against `TARGET_BLOCK_TIME_SECS` (60) per block interval
+- Blocks arriving more than 2x too fast raise the difficulty one step; more than 2x too
+  slow lowers it one step; in between, a block inherits its parent's difficulty
+- One step is one leading hex zero, i.e. a factor of 16 in work, that quantisation is
+  the per-retarget clamp, and it is stricter than Bitcoin's 4x limit
+- Difficulty is held within `MIN_DIFFICULTY` (1) and `MAX_DIFFICULTY` (32)
+- The genesis block is excluded from every window: its timestamp is a fixed constant
+  chosen so all nodes agree on it, not a mining time
+
+Each block records the difficulty it was mined at, and that value is part of the hash
+preimage, so it cannot be relabelled after the fact. Block acceptance re-derives the
+required difficulty from the chain and rejects any block whose claim does not match,
+the claim is never simply trusted.
+
 ### Consensus
 
 Nodes follow the **longest chain rule**:
 - The longest *valid* chain wins, and it must share our genesis block
-- Every block of an incoming chain is re-validated (proof-of-work, signatures, balances) before it is adopted
-- Forks are resolved by chain length; difficulty is fixed, so length is the work
+- Every block of an incoming chain is re-validated (proof-of-work at the difficulty the
+  retarget rules demand, signatures, balances) before it is adopted
+- Forks are resolved by chain length. Since difficulty now varies, length is only a
+  proxy for accumulated work; a most-work fork choice is the natural follow-up
 - Transactions not in the winning chain return to the mempool
 
 ## Project Structure
