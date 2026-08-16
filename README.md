@@ -92,6 +92,17 @@ sender can never commit more than it holds, every Merkle proof verifies against
 its own root, and a signature verifies only while its payload is untouched.
 These run as part of `cargo test`.
 
+### Multi-Node Reconvergence
+
+`tests/reconvergence.rs` runs the network as a network. It starts two or three
+real nodes on loopback ports the OS hands out, lets them mine competing forks in
+isolation, then wires them together through the actual listener and the actual
+length-prefixed framing, no mocks and no fixed ports. The assertions are the
+ones a distributed system has to meet: every node ends on the same tip hash at
+the same height, the heaviest chain wins whichever direction it arrives from, a
+node handed a block it cannot attach pulls the history behind it, and a block
+relays across a line of nodes to one the miner has never heard of.
+
 The `fuzz/` crate covers the other half, the bytes a node takes from a peer or
 from disk, with [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 for transaction, block, message and chain decoding:
@@ -325,7 +336,8 @@ rustchain/
 │   └── cli/
 │       └── mod.rs       # Command-line interface
 ├── tests/
-│   └── properties.rs    # Property-based tests over the consensus invariants
+│   ├── properties.rs    # Property-based tests over the consensus invariants
+│   └── reconvergence.rs # Multi-node fork resolution over real TCP sockets
 ├── benches/
 │   └── core.rs          # Criterion benchmarks (hashing, signatures, Merkle, mining)
 └── fuzz/
