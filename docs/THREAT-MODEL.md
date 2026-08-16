@@ -64,19 +64,27 @@ one block or twice in the chain.
 same sender before it compares against the balance, so a sender cannot queue two transactions
 that are individually affordable and jointly are not.
 
-**By reorganisation, partial, and this is the real gap.** The fork-choice rule is *longest
-valid chain*: `replace_chain` requires the candidate to be strictly longer, to share our
-genesis block, and to validate block by block from genesis. It does not compare accumulated
-work. With a fixed difficulty, length and work are the same ordering; with the retarget in
-`Blockchain::required_difficulty` they are not. A miner who controls block timestamps can
-declare a window slow, drop the difficulty one step per retarget interval (10 blocks), repeat
-down to `MIN_DIFFICULTY`, and then produce a long chain of cheap blocks that beats the honest
-chain on length while costing far less work. Summing per-block work and choosing the heaviest
-chain is the fix; it is not implemented.
+**By reorganisation: addressed for the time-warp attack, partial otherwise.** The fork-choice
+rule is now *heaviest valid chain*. `replace_chain` still requires the candidate to share our
+genesis block and to validate block by block from genesis, but it then compares accumulated
+work, not length: `total_work` is the saturating sum of `16^difficulty` over the blocks, and a
+candidate is adopted only if it carries strictly more work than what we hold. A tie or a
+lighter chain loses even when it is the longer one.
 
-Any recipient is exposed to an ordinary reorg for as long as they treat a block as final.
-Nothing in the code advises a confirmation depth, and the CLI reports a payment as complete as
-soon as it is mined once.
+This closes the time-warp reorg. With a fixed difficulty, length and work are the same
+ordering; with the retarget they are not, and the old length rule let a miner who drove the
+difficulty down win a reorg on block count while spending far less work. Two further changes
+back this up. Median-time-past (below, §6) bounds a block's timestamp from beneath, so a miner
+can no longer backdate blocks to declare a window slow and drop the difficulty at will; and the
+genesis/base difficulty is no longer read from the chain file (it is anchored to
+`DEFAULT_DIFFICULTY` on load), so a crafted file cannot declare its first retarget window mined
+at difficulty 1. A regression test builds a strictly longer, internally valid, but lighter
+chain and confirms it is refused.
+
+What remains is the *ordinary* reorg: an attacker with genuinely more work can still rewrite
+recent history, and this is the honest-majority assumption of §3, not a bug. Any recipient is
+exposed to it for as long as they treat a shallow block as final. Nothing in the code advises a
+confirmation depth, and the CLI reports a payment as complete as soon as it is mined once.
 
 ---
 
@@ -91,8 +99,9 @@ this one is far cheaper to overwhelm than most:
 - Mining is a CLI command, not something a node does on its own, so honest hashpower is not
   continuously applied.
 - The difficulty floor is `MIN_DIFFICULTY = 1`, one leading hex zero: 16 hashes on average.
-- Because fork choice counts blocks rather than work (§2), a majority is not even required,
-  only a long chain of cheap blocks.
+- Fork choice now counts work rather than blocks (§2), so a long chain of cheap blocks no
+  longer substitutes for a majority. What an attacker needs is genuinely more work than the
+  honest network applies, which, given the two points above, is still not much.
 
 Selfish mining and block withholding are equally unaddressed. There is no accounting for
 uncles, no finality gadget, and no checkpointing.
@@ -107,14 +116,20 @@ uncles, no finality gadget, and no checkpointing.
   in the `listen_address` field of its `Version` handshake or listed in reply to `GetPeers`.
   Nothing proves a peer controls the address it advertises, so one host can occupy the peer
   table under any number of names.
-- **The peer table is unbounded.** `handle_message` inserts every advertised `listen_address`
-  into a `HashSet` with no cap, no eviction, no scoring and no bucketing by network range. A
-  peer that reconnects with fresh strings grows the table without limit, both a memory cost
-  and a way to push honest peers into a minority of the table.
-- **No diversity requirement.** A node connects to the peers named on its command line and to
-  whatever they gossip. An attacker who supplies all of them owns the node's view of the
-  chain: `sync_with_peer` will adopt any *valid* chain that is longer, and an eclipsed node
-  cannot tell a private valid chain from the public one.
+- **The peer table is bounded but not managed.** Every address is now validated as a
+  `SocketAddr` and the table is capped at `MAX_PEERS = 1024`, so a peer can no longer grow it
+  without limit or point the node at a malformed target. What is still missing is eviction,
+  scoring and bucketing by network range: once the table is full, honest addresses learned
+  later are simply dropped, so a burst of attacker addresses arriving first can still crowd the
+  table.
+- **Discovery is deliberately narrow.** A node records the peers named on its command line and
+  the peers it directly handshakes with, but it no longer auto-dials addresses a peer merely
+  advertised through `GetPeers`: that closes the SSRF/reflection vector where one peer feeds the
+  node a list of arbitrary hosts to dial. The flip side is that there is no gossip-based
+  discovery at all, so an attacker who supplies every configured peer still owns the node's
+  view: `sync_with_peer` adopts any *valid* chain that is heavier, and an eclipsed node cannot
+  tell a private valid chain from the public one. Authenticated peers, diversity requirements
+  and address-book management are the real fix and are not implemented.
 - **No transport security.** Messages are plaintext JSON over TCP with no encryption and no
   authentication, so anyone on the path can read, drop, reorder or rewrite them. Validation
   keeps a rewritten message from being *accepted*, but nothing keeps it from being *dropped*:
@@ -165,16 +180,19 @@ Open:
 
 ## 6. Timestamp manipulation
 
-**Partial.** A block's timestamp must be at least its parent's and at most two hours ahead of
-the local clock. Within that window the miner chooses freely, which is enough for the
-difficulty attack in §2: timestamps are the only input to the retarget, and they are
-attacker-supplied. Bitcoin's median-time-past rule, a block must be later than the median of
-the previous eleven, is not implemented, so a single miner has more room here than in a real
-chain.
+**Partial, and much narrower than it was.** A block's timestamp now has a median-time-past
+lower bound: it must be strictly greater than the median of the previous up to eleven block
+timestamps (`MEDIAN_TIME_SPAN`). This is the rule that was missing, and it is what removes the
+free hand a miner had over the only input the retarget reads: a single miner can no longer
+backdate a block to declare a window slow and walk the difficulty down. An honest block this
+node mines is nudged one second past its parent so clock resolution alone never fails it. The
+upper bound is unchanged: at most two hours ahead of the local clock.
 
-The upper bound is measured against the local clock, so a node with a badly wrong clock
-disagrees with its peers about what is acceptable. There is no NTP requirement and no
-tolerance for peer clock skew beyond the two-hour window.
+The residual is the upper bound, measured against the local clock, so a node with a badly wrong
+clock disagrees with its peers about what is acceptable. There is no NTP requirement and no
+tolerance for peer clock skew beyond the two-hour window. Median-time-past also allows a block
+to sit slightly before its parent as long as it is past the window median, which is the
+standard rule, not a regression.
 
 Retargeting itself is defended: the required difficulty is derived from the chain and checked
 against what the block claims, the claim is inside the hash preimage, and the response to any
@@ -239,11 +257,12 @@ The domain tag additionally keeps a preimage produced in one context from ever b
 another: a block header cannot be presented as a signing payload. Unit tests, a property test
 over randomly split fields, and the tests listed against each bullet above pin all of this.
 
-**Merkle second-preimage, addressed.** Leaves, internal nodes and the odd-level padding
-sentinel each hash under their own domain tag, so no leaf can be presented as an internal
-node. Odd levels are padded with the constant sentinel rather than by duplicating the last
-node, which is CVE-2012-2459: duplication makes `[a, b, c]` and `[a, b, c, c]` share a root,
-so the last payment in a block could be repeated without changing the block hash.
+**Merkle second-preimage: addressed.** Leaves, internal nodes, the odd-level padding
+sentinel and the empty-tree root each hash under their own domain tag, so no leaf can be
+presented as an internal node and an empty tree cannot be confused with a one-transaction one.
+Odd levels are padded with the constant sentinel rather than by duplicating the last node,
+which is CVE-2012-2459: duplication makes `[a, b, c]` and `[a, b, c, c]` share a root, so the
+last payment in a block could be repeated without changing the block hash.
 
 ---
 
@@ -284,9 +303,14 @@ cost someone a key:
 - Nothing locks the chain file, so a node and a concurrent `mine` will overwrite each other's
   updates.
 
-The file *contents* are, at least, not trusted: `from_json` validates the whole chain and
-rebuilds balances and the spent-id index from the blocks, so editing the `balances` map in the
-file changes nothing.
+One narrower leak is closed: `Wallet` no longer derives `Debug`, so the private key cannot
+reach a log line or a panic message that happens to format a wallet; it renders as
+`<redacted>`, and only an explicit `to_json` export writes it out.
+
+The file *contents* are, at least, not trusted: `from_json` validates the whole chain,
+rebuilds balances and the spent-id index from the blocks, and no longer reads the base
+difficulty from the file, so editing the `balances` map or the declared `difficulty` changes
+nothing.
 
 ---
 
@@ -295,12 +319,14 @@ file changes nothing.
 | # | Threat | Status |
 |---|---|---|
 | 2 | Double-spend in a block or the mempool | Addressed |
-| 2 | Double-spend by reorganisation (length-based fork choice) | **Open** |
+| 2 | Double-spend by reorganisation, time-warp / cheap-block fork | Addressed |
+| 2 | Double-spend by reorganisation, ordinary (more-work) reorg | Accepted (see §3) |
 | 3 | Majority hashpower | Accepted |
 | 4 | Eclipse / Sybil on the P2P layer | **Open** |
+| 4 | SSRF / reflection via advertised peers | Addressed |
 | 5 | DoS via malformed or oversized messages | Partial |
 | 5 | Unbounded mempool, no fees | **Open** |
-| 6 | Timestamp manipulation (no median-time-past) | Partial |
+| 6 | Timestamp manipulation (median-time-past now enforced) | Partial |
 | 7 | Replay within a chain | Addressed |
 | 7 | Cross-deployment replay (no network id) | **Open** |
 | 8 | Signature malleability | Addressed |
@@ -308,10 +334,12 @@ file changes nothing.
 | 8 | Merkle second-preimage, CVE-2012-2459 | Addressed |
 | 9 | Coinbase inflation | Partial |
 | 9 | `mining_reward` readable from the chain file | **Open** |
+| 9 | Base difficulty readable from the chain file | Addressed |
 | 10 | Plaintext keys, non-atomic writes | **Open** |
+| 10 | Private key leaked through `Debug` | Addressed |
 
-The four that would have to close before this were anything but educational, in order:
-work-based fork choice (§2), a peer layer with identity and bounds (§4), a bounded and priced
-mempool (§5), and encrypted key storage (§10).
+The three that would have to close before this were anything but educational, in order: a peer
+layer with identity and bounds (§4), a bounded and priced mempool (§5), and encrypted key
+storage (§10). Work-based fork choice, the first item on the old list, is now done.
 
 Reporting: see [SECURITY.md](../SECURITY.md).

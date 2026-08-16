@@ -63,12 +63,14 @@ enforces its own quality bar on every push.
   `TARGET_BLOCK_TIME_SECS` (60) per block interval: more than 2x too fast raises
   the difficulty one step, more than 2x too slow lowers it one step, otherwise a
   block inherits its parent's. One step is one leading hex zero, a factor of 16
-  in work, so the quantisation is itself the per-retarget clamp, stricter than
-  Bitcoin's 4x limit. The result is held within `MIN_DIFFICULTY` (1) and
-  `MAX_DIFFICULTY` (32), and genesis is excluded from every window because its
-  timestamp is a determinism constant rather than a mining time.
+  in work, so a retarget moves the difficulty by at most one step (a 16x change)
+  per window. That is a coarser control than Bitcoin's 4x-per-retarget limit, a
+  design simplification rather than a hardening. The result is held within
+  `MIN_DIFFICULTY` (1) and `MAX_DIFFICULTY` (32), and genesis is excluded from
+  every window because its timestamp is a determinism constant rather than a
+  mining time.
 - Peer-driven reconvergence. `Node::reconverge` pulls every known peer's chain
-  and adopts the longest valid one, routed through the same `replace_chain` that
+  and adopts the heaviest valid one, routed through the same `replace_chain` that
   already decided fork choice. It is triggered by a `NewBlock` at or beyond our
   tip that will not attach, not attaching is the signal that the missing
   history is ours to fetch, and by a `Version` announcing a greater height, on
@@ -85,6 +87,22 @@ enforces its own quality bar on every push.
 
 ### Changed
 
+- Fork choice is heaviest-work, not longest-chain. `replace_chain` validates a
+  candidate in full and then adopts it only if `total_work` (the saturating sum
+  of `16^difficulty` over its blocks) strictly exceeds our own; a tie or a
+  lighter chain loses even when it is the longer one. `reconverge` and
+  `sync_with_peer` drop their length pre-checks and route the decision through
+  `replace_chain`. With the retarget in play, length and work come apart, so
+  this closes the time-warp reorg: a long run of cheap blocks that beats the
+  honest chain on block count while costing far less work.
+- The genesis/base difficulty is no longer read from the chain file. It is
+  `#[serde(skip)]` and anchored to `DEFAULT_DIFFICULTY` on load, so a crafted
+  file can no longer declare its first retarget window mined at difficulty 1. A
+  lower-difficulty local network is configured in memory through
+  `with_difficulty`, where the value is trusted.
+- `Wallet` implements `Debug` by hand and renders the private key as
+  `<redacted>`, so it never reaches a log line or a panic message. Explicit
+  export through `Serialize`/`to_json` is unchanged.
 - Applied `rustfmt` to the whole tree once, so the new format gate starts from
   a clean baseline and later diffs carry no formatting noise.
 - `Blockchain::latest_block` returns `Option<&Block>` instead of panicking on
@@ -118,6 +136,27 @@ enforces its own quality bar on every push.
 
 ### Fixed
 
+- Block timestamps had no lower bound beyond their parent, so one miner
+  controlled the only input the difficulty retarget reads. A block whose
+  timestamp is at or below the median of the previous up to 11 blocks
+  (median-time-past) is now refused; honest mining nudges a new block past its
+  parent so clock resolution never fails an honest block.
+- `replace_chain` indexed `self.chain[0]`, panicking on a chainless
+  `Blockchain`. It now reads the genesis through `first()` and reports
+  `EmptyChain`.
+- `connect_to_peer` read from a peer with no timeout. Both reads are wrapped in
+  `REQUEST_TIMEOUT`, so a peer that connects and goes silent cannot pin the
+  task.
+- Peer addresses were inserted unvalidated and unbounded, and any address a
+  peer advertised became a host this node would dial. Addresses are now checked
+  as socket addresses, the table is capped at `MAX_PEERS`, and addresses learned
+  only from a peer's `GetPeers` advertisement are no longer auto-dialled, which
+  contains the SSRF/reflection surface.
+- The empty Merkle tree reused the leaf domain for its root; it now has its own
+  `MERKLE_EMPTY_DOMAIN`, so the empty root can equal no leaf. (This changes the
+  empty-tree hash.)
+- `clap` carried a placeholder author and a hardcoded version; it now derives
+  both from `Cargo.toml`.
 - Merkle padding duplicated the last node on odd levels (CVE-2012-2459), so
   `[a, b, c]` and `[a, b, c, c]` shared a root. Odd levels are padded with a
   sentinel in its own hash domain, and repeated transaction ids are rejected.
@@ -145,8 +184,10 @@ enforces its own quality bar on every push.
   and (difficulty 12, nonce 3) hashed identically, one proof-of-work standing
   for two different claims about how hard the block was. Merkle internal nodes
   concatenated their children, unambiguous only because of what the caller
-  happened to pass. All five preimages are now length-prefixed and
-  domain-separated.
+  happened to pass. All seven preimages are now length-prefixed and
+  domain-separated: the transaction hash, the transaction signing payload, the
+  block header, and the Merkle leaf, internal node, padding sentinel and
+  empty-tree root.
 
 ## [0.1.0]
 

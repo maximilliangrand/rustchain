@@ -24,7 +24,7 @@ A blockchain implementation from scratch in Rust. Built for educational purposes
 - **P2P Networking**
   - Node discovery and connection, over a length-prefixed message framing
   - Block and transaction propagation
-  - Chain synchronization (longest chain rule), persisted to the node's chain file
+  - Chain synchronization (heaviest-work chain rule), persisted to the node's chain file
 
   Nodes do not mine on their own: blocks are produced with the `mine` command and
   propagate from there.
@@ -99,7 +99,7 @@ real nodes on loopback ports the OS hands out, lets them mine competing forks in
 isolation, then wires them together through the actual listener and the actual
 length-prefixed framing, no mocks and no fixed ports. The assertions are the
 ones a distributed system has to meet: every node ends on the same tip hash at
-the same height, the longest valid chain wins whichever direction it arrives
+the same height, the heaviest valid chain wins whichever direction it arrives
 from, a node handed a block it cannot attach pulls the history behind it, and a
 block relays across a line of nodes to one the miner has never heard of.
 
@@ -110,6 +110,7 @@ for transaction, block, message and chain decoding:
 ```bash
 cargo install cargo-fuzz
 cargo +nightly fuzz build
+mkdir -p fuzz/corpus/block_deserialize
 cargo +nightly fuzz run block_deserialize \
     fuzz/corpus/block_deserialize fuzz/seeds/block_deserialize -- -max_total_time=60
 ```
@@ -263,8 +264,8 @@ they were pasted into. Joined with a separator, the payment `("a|b" -> "c")` and
 transfers. The domain tag keeps a preimage built in one context, a block header, from ever
 being a valid preimage in another, a signature, and is where a network id would go.
 
-Six preimages use it: the transaction hash, the transaction signing payload, the block
-header, and the Merkle leaf, internal node and padding sentinel. See
+Seven preimages use it: the transaction hash, the transaction signing payload, the block
+header, and the Merkle leaf, internal node, padding sentinel and empty-tree root. See
 [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) §8.
 
 ### Proof of Work
@@ -289,8 +290,10 @@ number from the same blocks, which is what makes a block's claimed difficulty ch
   closed is compared against `TARGET_BLOCK_TIME_SECS` (60) per block interval
 - Blocks arriving more than 2x too fast raise the difficulty one step; more than 2x too
   slow lowers it one step; in between, a block inherits its parent's difficulty
-- One step is one leading hex zero, i.e. a factor of 16 in work, that quantisation is
-  the per-retarget clamp, and it is stricter than Bitcoin's 4x limit
+- One step is one leading hex zero, a factor of 16 in required work, and a retarget
+  moves the difficulty by at most one step per window. That single step is the clamp: a
+  16x change per window, which is a coarser control than Bitcoin's 4x-per-retarget limit,
+  not a stricter one
 - Difficulty is held within `MIN_DIFFICULTY` (1) and `MAX_DIFFICULTY` (32)
 - The genesis block is excluded from every window: its timestamp is a fixed constant
   chosen so all nodes agree on it, not a mining time
@@ -302,12 +305,14 @@ the claim is never simply trusted.
 
 ### Consensus
 
-Nodes follow the **longest chain rule**:
-- The longest *valid* chain wins, and it must share our genesis block
+Nodes follow the **heaviest-work chain rule**:
+- The chain carrying the most accumulated work wins, and it must share our genesis block
 - Every block of an incoming chain is re-validated (proof-of-work at the difficulty the
-  retarget rules demand, signatures, balances) before it is adopted
-- Forks are resolved by chain length. Since difficulty now varies, length is only a
-  proxy for accumulated work; a most-work fork choice is the natural follow-up
+  retarget rules demand, signatures, balances) before its work is counted
+- Forks are resolved by total work, the saturating sum of `16^difficulty` over the
+  blocks, not by length. Since difficulty varies with the retarget, a longer chain of
+  cheap blocks can represent less work than a shorter chain of hard ones, so a longer
+  chain no longer wins on length alone
 - Transactions not in the winning chain return to the mempool
 
 ## Project Structure

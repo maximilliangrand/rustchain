@@ -9,7 +9,7 @@ repository wants.
 
 ## Supported versions
 
-The `main` branch only. There are no releases and no backports.
+The `master` branch only. There are no releases and no backports.
 
 ## What is already known
 
@@ -43,7 +43,7 @@ A useful report contains:
 
 - Acknowledgement within 7 days.
 - An assessment, confirmed, known, or not a bug, within 14 days.
-- A fix on `main` with a regression test naming the attack, and credit in `CHANGELOG.md`
+- A fix on `master` with a regression test naming the attack, and credit in `CHANGELOG.md`
   unless you would rather not be named.
 
 Because nothing is deployed, there is no embargo period to negotiate: the fix and the

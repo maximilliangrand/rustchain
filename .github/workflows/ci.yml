@@ -40,6 +40,19 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+  msrv:
+    name: MSRV (1.90)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the declared minimum supported Rust version so the badge is
+      # exercised, not just asserted. A check, not a test run: this proves the
+      # crate still builds on 1.90.
+      - uses: dtolnay/rust-toolchain@1.90
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check on the MSRV
+        run: cargo check --all-targets --locked
+
   test:
     name: Test
     runs-on: ubuntu-latest
