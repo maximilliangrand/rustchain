@@ -58,6 +58,30 @@ enforces its own quality bar on every push.
   signs: a domain tag, then every field as an 8-byte big-endian length followed
   by exactly that many bytes.
 - `#![warn(missing_docs)]` at the crate root, and the doc comments it asked for.
+- Proof-of-work difficulty retargeting. Every `RETARGET_INTERVAL` (10) blocks the
+  wall-clock span of the window that just closed is compared with
+  `TARGET_BLOCK_TIME_SECS` (60) per block interval: more than 2x too fast raises
+  the difficulty one step, more than 2x too slow lowers it one step, otherwise a
+  block inherits its parent's. One step is one leading hex zero, a factor of 16
+  in work, so the quantisation is itself the per-retarget clamp, stricter than
+  Bitcoin's 4x limit. The result is held within `MIN_DIFFICULTY` (1) and
+  `MAX_DIFFICULTY` (32), and genesis is excluded from every window because its
+  timestamp is a determinism constant rather than a mining time.
+- Peer-driven reconvergence. `Node::reconverge` pulls every known peer's chain
+  and adopts the longest valid one, routed through the same `replace_chain` that
+  already decided fork choice. It is triggered by a `NewBlock` at or beyond our
+  tip that will not attach, not attaching is the signal that the missing
+  history is ours to fetch, and by a `Version` announcing a greater height, on
+  both the listening and the dialling side. `Node::bind` is split out of
+  `Node::start` so a node given port 0 learns and advertises the port it was
+  actually assigned instead of announcing `:0`.
+- `tests/reconvergence.rs`: multi-node fork resolution over real TCP. Two or
+  three nodes on OS-assigned loopback ports, the real listener and the real
+  length-prefixed framing, no mocks and no fixed ports. Forked nodes reconverge
+  on one tip hash at one height, a shorter chain loses from either direction, an
+  unattachable block pulls the history behind it, and a mined block relays to a
+  node the miner has never heard of. Waits poll real chain state under a
+  deadline rather than sleeping.
 
 ### Changed
 
@@ -84,6 +108,13 @@ enforces its own quality bar on every push.
   path is provided; an existing `blockchain.json` will no longer validate.
 - The balance map is described as what it is, an account ledger, one balance
   per address, instead of "UTXO simplified". This chain has no unspent outputs.
+- A block records the difficulty it was mined at, and that value is part of the
+  hash preimage, so it cannot be relabelled after the fact. Block acceptance and
+  whole-chain validation both re-derive the required difficulty from the chain
+  prefix and reject a block whose claim does not match; mining uses the same
+  derivation rather than the node's setting. `Blockchain::difficulty` is kept as
+  the chain's *starting* difficulty, so `with_difficulty` and `--difficulty`
+  keep working and chains shorter than one retarget interval are unaffected.
 
 ### Fixed
 

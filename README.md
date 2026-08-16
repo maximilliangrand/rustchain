@@ -73,7 +73,7 @@ A blockchain implementation from scratch in Rust. Built for educational purposes
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rustchain.git
+git clone https://github.com/maximilliangrand/rustchain.git
 cd rustchain
 
 # Build the project
@@ -99,9 +99,9 @@ real nodes on loopback ports the OS hands out, lets them mine competing forks in
 isolation, then wires them together through the actual listener and the actual
 length-prefixed framing, no mocks and no fixed ports. The assertions are the
 ones a distributed system has to meet: every node ends on the same tip hash at
-the same height, the heaviest chain wins whichever direction it arrives from, a
-node handed a block it cannot attach pulls the history behind it, and a block
-relays across a line of nodes to one the miner has never heard of.
+the same height, the longest valid chain wins whichever direction it arrives
+from, a node handed a block it cannot attach pulls the history behind it, and a
+block relays across a line of nodes to one the miner has never heard of.
 
 The `fuzz/` crate covers the other half, the bytes a node takes from a peer or
 from disk, with [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets

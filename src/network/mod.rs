@@ -447,7 +447,7 @@ impl Node {
         }
     }
 
-    /// Pull every known peer's chain and adopt the heaviest valid one.
+    /// Pull every known peer's chain and adopt the longest valid one.
     ///
     /// Reconvergence needs a pull as well as a push. Broadcasting a block tells
     /// a peer that a better chain exists but not what is in it, so a node that

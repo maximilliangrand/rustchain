@@ -11,7 +11,7 @@
 //! What is covered:
 //!
 //! - three nodes that mined competing forks in isolation reconverge on the one
-//!   heaviest chain, and agree on the same tip hash at the same height;
+//!   longest chain, and agree on the same tip hash at the same height;
 //! - a node handed a block it cannot attach pulls the history behind it, so a
 //!   fork deeper than one block still closes;
 //! - a shorter chain is never adopted, whichever direction it arrives from;
@@ -167,32 +167,32 @@ async fn wait_for_agreement(nodes: &[&LiveNode], expected_height: usize) -> Stri
 }
 
 #[tokio::test]
-async fn three_forked_nodes_reconverge_on_the_heaviest_chain() {
+async fn three_forked_nodes_reconverge_on_the_longest_chain() {
     // Three nodes mine competing chains in isolation. Same genesis, different
     // miners, so all three tips are genuinely different blocks and only one
     // chain can win.
     let short = LiveNode::spawn(2, "miner-short").await;
-    let heaviest = LiveNode::spawn(5, "miner-heaviest").await;
+    let longest = LiveNode::spawn(5, "miner-longest").await;
     let middle = LiveNode::spawn(3, "miner-middle").await;
 
     assert_eq!(short.height().await, 3);
-    assert_eq!(heaviest.height().await, 6);
+    assert_eq!(longest.height().await, 6);
     assert_eq!(middle.height().await, 4);
 
-    let winning_tip = heaviest.tip().await;
+    let winning_tip = longest.tip().await;
     assert_ne!(short.tip().await, winning_tip);
     assert_ne!(middle.tip().await, winning_tip);
 
     // Wire them together over real sockets, in the order that exercises both
-    // directions: the short node dials the heaviest one and has to climb, then
-    // the heaviest dials the middle one, which has to climb without ever having
+    // directions: the short node dials the longest one and has to climb, then
+    // the longest dials the middle one, which has to climb without ever having
     // asked for anything.
     short
         .node
-        .connect_to_peer(&heaviest.address)
+        .connect_to_peer(&longest.address)
         .await
-        .expect("the heaviest node is listening");
-    heaviest
+        .expect("the longest node is listening");
+    longest
         .node
         .connect_to_peer(&middle.address)
         .await
@@ -203,10 +203,10 @@ async fn three_forked_nodes_reconverge_on_the_heaviest_chain() {
         .await
         .expect("the short node is listening");
 
-    let agreed = wait_for_agreement(&[&short, &heaviest, &middle], 6).await;
+    let agreed = wait_for_agreement(&[&short, &longest, &middle], 6).await;
     assert_eq!(
         agreed, winning_tip,
-        "the network converged on a chain that was not the heaviest"
+        "the network converged on a chain that was not the longest"
     );
 }
 
