@@ -214,12 +214,17 @@ impl Block {
     }
 
     /// Get the total value transferred in this block (excluding coinbase)
+    ///
+    /// A `Block` is deserialized straight off the wire, before any validation
+    /// says the amounts are affordable, so the running total is saturated
+    /// rather than summed: two transactions of `u64::MAX / 2 + 1` are a report
+    /// that reads `u64::MAX`, not a panicking node.
     pub fn total_value(&self) -> u64 {
         self.transactions
             .iter()
             .filter(|tx| !tx.is_coinbase())
             .map(|tx| tx.amount)
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Get the mining reward (coinbase amount) in this block
@@ -355,5 +360,23 @@ mod tests {
 
         assert_eq!(block.total_value(), 300);
         assert_eq!(block.mining_reward(), 50);
+    }
+
+    #[test]
+    fn total_value_saturates_instead_of_overflowing() {
+        // Found by `cargo fuzz run block_deserialize`: a block arrives as bytes,
+        // and nothing has yet said its amounts are affordable, so summing them
+        // used to abort the process on any pair adding past u64::MAX.
+        let half = u64::MAX / 2 + 1;
+        let block = Block::new(
+            1,
+            vec![
+                Transaction::new("a".into(), "b".into(), half),
+                Transaction::new("c".into(), "d".into(), half),
+            ],
+            "prev".to_string(),
+        );
+
+        assert_eq!(block.total_value(), u64::MAX);
     }
 }

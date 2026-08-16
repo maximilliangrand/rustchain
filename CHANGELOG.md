@@ -26,6 +26,17 @@ enforces its own quality bar on every push.
   code path reachable from a peer message, a stored chain or a wallet file can
   abort the process. Tests keep an explicit `cfg(test)` allow.
 - `BlockchainError::EmptyChain`, for the paths that need a chain tip.
+- Property-based tests (`tests/properties.rs`, using `proptest`) over the
+  invariants the chain rests on: a mined chain stays valid and conserves coins,
+  `replace_chain` adopts a candidate exactly when it is longer *and* valid, a
+  sender can never commit more than it holds, every Merkle proof verifies
+  against its own root, and a signature verifies only while its payload is
+  untouched. Each was checked by breaking the production line it guards.
+- A `cargo-fuzz` harness (`fuzz/`) with five targets covering every byte the
+  node takes from somewhere it does not control: `Transaction` and `Block`
+  deserialization, `Message` decoding, the length-prefixed framing in
+  `read_message`, and `Blockchain::from_json`. Checked-in seed corpora in
+  `fuzz/seeds/` and a 60-second-per-target smoke job in CI.
 
 ### Changed
 
@@ -60,6 +71,10 @@ enforces its own quality bar on every push.
   create -> mine -> confirm workflow silently discarded every transaction.
 - `Wallet::from_private_key` and several display paths panicked on untrusted
   input; they now return errors or truncate on character boundaries.
+- `Block::total_value` aborted the process on any block whose amounts summed
+  past `u64::MAX`, a block is deserialized before anything says its amounts are
+  affordable. Found by `cargo fuzz run block_deserialize`; both it and
+  `Blockchain::total_supply` now saturate.
 
 ## [0.1.0]
 

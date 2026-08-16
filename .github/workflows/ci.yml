@@ -50,6 +50,42 @@ jobs:
       - name: cargo test
         run: cargo test --all-features --locked
 
+  fuzz:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # libFuzzer needs nightly: the sanitizer instrumentation cargo-fuzz asks
+      # for is not on stable.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: cargo fuzz build
+        run: cargo fuzz build
+      # A minute per target against the checked-in seeds. This catches a
+      # regression that panics on obvious input; a real campaign needs a corpus
+      # that survives between runs.
+      - name: Fuzz each target briefly
+        run: |
+          for target in transaction_deserialize block_deserialize message_decode message_frame chain_import; do
+            echo "::group::$target"
+            mkdir -p "fuzz/corpus/$target"
+            cargo fuzz run "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- -max_total_time=60
+            echo "::endgroup::"
+          done
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   build:
     name: Release build
     runs-on: ubuntu-latest

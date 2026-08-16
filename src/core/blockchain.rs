@@ -602,8 +602,16 @@ impl Blockchain {
     }
 
     /// Get total coins in circulation
+    ///
+    /// Saturating for the same reason as [`Block::total_value`]: a chain that
+    /// balanced to more than `u64::MAX` could never have been accepted, but a
+    /// reporting call has no business being the thing that takes the node down
+    /// if one ever were.
     pub fn total_supply(&self) -> u64 {
-        self.balances.values().sum()
+        self.balances
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Get the total number of transactions in the chain

@@ -3,3 +3,10 @@
 # Wallet files (contain private keys)
 *.wallet.json
 wallet_*.json
+
+# Fuzzing working state. `fuzz/seeds/` is checked in; everything the fuzzer
+# generates for itself is not.
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

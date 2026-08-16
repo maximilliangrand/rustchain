@@ -79,9 +79,31 @@ cd rustchain
 # Build the project
 cargo build --release
 
-# Run tests
+# Run tests (unit, property-based, and doc tests)
 cargo test
 ```
+
+### Property Tests and Fuzzing
+
+`tests/properties.rs` checks the consensus invariants against randomized inputs
+rather than hand-picked ones: a mined chain stays valid and conserves coins,
+`replace_chain` adopts a candidate exactly when it is longer *and* valid, a
+sender can never commit more than it holds, every Merkle proof verifies against
+its own root, and a signature verifies only while its payload is untouched.
+These run as part of `cargo test`.
+
+The `fuzz/` crate covers the other half, the bytes a node takes from a peer or
+from disk, with [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+for transaction, block, message and chain decoding:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz build
+cargo +nightly fuzz run block_deserialize \
+    fuzz/corpus/block_deserialize fuzz/seeds/block_deserialize -- -max_total_time=60
+```
+
+See [`fuzz/README.md`](fuzz/README.md) for the full target list.
 
 ### Run the Demo
 
@@ -276,7 +298,11 @@ rustchain/
 │   │   └── mod.rs       # P2P networking
 │   └── cli/
 │       └── mod.rs       # Command-line interface
-└── tests/               # Integration tests
+├── tests/
+│   └── properties.rs    # Property-based tests over the consensus invariants
+└── fuzz/
+    ├── fuzz_targets/    # cargo-fuzz targets for every untrusted decode path
+    └── seeds/           # Checked-in seed corpora
 ```
 
 ## API Usage (as a Library)
