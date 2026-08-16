@@ -98,8 +98,12 @@ enum Corruption {
     CoinbaseAmount,
     /// Root the chain in a genesis block that is not ours.
     ForeignGenesis,
-    /// Cut the chain back to genesis.
-    Truncate,
+    /// Remove a middle block, so the chain stays long but its interior links
+    /// break. Unlike cutting back to genesis (which only ever produces a
+    /// too-short candidate, rejected before validation is reached), this leaves
+    /// a candidate whose length can still beat ours, so acceptance turns on the
+    /// interior-linkage check rather than on length.
+    SpliceMiddle,
     /// Repeat the tip, so it references a block that is no longer its parent.
     RepeatTip,
 }
@@ -110,7 +114,7 @@ fn arb_corruption() -> impl Strategy<Value = Corruption> {
         Just(Corruption::Nonce),
         Just(Corruption::CoinbaseAmount),
         Just(Corruption::ForeignGenesis),
-        Just(Corruption::Truncate),
+        Just(Corruption::SpliceMiddle),
         Just(Corruption::RepeatTip),
     ]
 }
@@ -145,7 +149,11 @@ fn corrupt(chain: &mut Vec<Block>, corruption: Corruption) {
                 *genesis = foreign_genesis();
             }
         }
-        Corruption::Truncate => chain.truncate(1),
+        Corruption::SpliceMiddle => {
+            if chain.len() > 2 {
+                chain.remove(chain.len() / 2);
+            }
+        }
         Corruption::RepeatTip => {
             if let Some(tip) = chain.last().cloned() {
                 chain.push(tip);
@@ -235,11 +243,9 @@ proptest! {
             "the only coins ever created are the coinbase rewards"
         );
 
-        // Persistence is the other untrusted boundary the same rules guard.
-        let json = blockchain.to_json().expect("a valid chain serializes");
-        let reloaded = Blockchain::from_json(&json).expect("our own chain must reload");
-        prop_assert_eq!(chain_hashes(&reloaded.chain), chain_hashes(&blockchain.chain));
-        prop_assert_eq!(reloaded.total_supply(), blockchain.total_supply());
+        // The chain mines at the fast test difficulty, which the file boundary
+        // no longer trusts as a base, so persistence is covered separately at
+        // the network difficulty by `a_default_difficulty_chain_round_trips`.
     }
 
     /// `replace_chain` adopts a candidate if and only if it is strictly longer

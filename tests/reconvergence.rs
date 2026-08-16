@@ -11,7 +11,7 @@
 //! What is covered:
 //!
 //! - three nodes that mined competing forks in isolation reconverge on the one
-//!   longest chain, and agree on the same tip hash at the same height;
+//!   heaviest chain, and agree on the same tip hash at the same height;
 //! - a node handed a block it cannot attach pulls the history behind it, so a
 //!   fork deeper than one block still closes;
 //! - a shorter chain is never adopted, whichever direction it arrives from;
@@ -167,10 +167,11 @@ async fn wait_for_agreement(nodes: &[&LiveNode], expected_height: usize) -> Stri
 }
 
 #[tokio::test]
-async fn three_forked_nodes_reconverge_on_the_longest_chain() {
+async fn three_forked_nodes_reconverge_on_the_heaviest_chain() {
     // Three nodes mine competing chains in isolation. Same genesis, different
     // miners, so all three tips are genuinely different blocks and only one
-    // chain can win.
+    // chain can win. Every block is mined at the same difficulty here, so the
+    // heaviest chain is also the longest one.
     let short = LiveNode::spawn(2, "miner-short").await;
     let longest = LiveNode::spawn(5, "miner-longest").await;
     let middle = LiveNode::spawn(3, "miner-middle").await;
@@ -206,7 +207,7 @@ async fn three_forked_nodes_reconverge_on_the_longest_chain() {
     let agreed = wait_for_agreement(&[&short, &longest, &middle], 6).await;
     assert_eq!(
         agreed, winning_tip,
-        "the network converged on a chain that was not the longest"
+        "the network converged on a chain that was not the heaviest"
     );
 }
 
