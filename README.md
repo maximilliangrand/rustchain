@@ -2,7 +2,9 @@
 
 A blockchain implementation from scratch in Rust. Built for educational purposes and as a portfolio project demonstrating deep understanding of blockchain internals.
 
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/maximilliangrand/rustchain/actions/workflows/ci.yml/badge.svg)](https://github.com/maximilliangrand/rustchain/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://www.rust-lang.org/)
+[![Edition](https://img.shields.io/badge/edition-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## Features
@@ -64,7 +66,7 @@ A blockchain implementation from scratch in Rust. Built for educational purposes
 
 ### Prerequisites
 
-- Rust 1.70 or higher
+- Rust 1.90 or higher
 - Cargo package manager
 
 ### Installation

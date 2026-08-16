@@ -2,6 +2,7 @@
 name = "rustchain"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.90"
 authors = ["Maxim Gagiev <maximgagiev@myg-media.com>"]
 description = "A blockchain implementation from scratch in Rust - educational & portfolio project"
 repository = "https://github.com/maximilliangrand/rustchain"
