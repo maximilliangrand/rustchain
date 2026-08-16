@@ -58,10 +58,10 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-pub mod core;
-pub mod wallet;
-pub mod network;
 pub mod cli;
+pub mod core;
+pub mod network;
+pub mod wallet;
 
 pub use core::{Block, Blockchain, MerkleTree, Transaction};
 pub use wallet::Wallet;

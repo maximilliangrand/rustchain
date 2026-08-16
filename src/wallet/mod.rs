@@ -5,9 +5,9 @@
 //! - Address generation
 //! - Transaction signing
 
-use serde::{Deserialize, Serialize};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use crate::core::transaction::{derive_address, SignError};
 use crate::core::Transaction;
@@ -85,11 +85,7 @@ impl Wallet {
         recipient: &str,
         amount: u64,
     ) -> Result<Transaction, SignError> {
-        let mut tx = Transaction::new(
-            self.address.clone(),
-            recipient.to_string(),
-            amount,
-        );
+        let mut tx = Transaction::new(self.address.clone(), recipient.to_string(), amount);
         tx.sign(&self.private_key)?;
         Ok(tx)
     }
@@ -137,8 +133,8 @@ mod tests {
     #[test]
     fn test_from_private_key() {
         let wallet1 = Wallet::new();
-        let wallet2 = Wallet::from_private_key(&wallet1.private_key)
-            .expect("a wallet's own key must import");
+        let wallet2 =
+            Wallet::from_private_key(&wallet1.private_key).expect("a wallet's own key must import");
 
         assert_eq!(wallet1.address, wallet2.address);
         assert_eq!(wallet1.public_key, wallet2.public_key);

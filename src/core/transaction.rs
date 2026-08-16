@@ -204,7 +204,8 @@ impl Transaction {
             return true;
         }
 
-        let (Some(signature_hex), Some(public_key_hex)) = (&self.signature, &self.public_key) else {
+        let (Some(signature_hex), Some(public_key_hex)) = (&self.signature, &self.public_key)
+        else {
             return false;
         };
 
@@ -251,11 +252,7 @@ mod tests {
 
     #[test]
     fn test_create_transaction() {
-        let tx = Transaction::new(
-            "alice".to_string(),
-            "bob".to_string(),
-            100,
-        );
+        let tx = Transaction::new("alice".to_string(), "bob".to_string(), 100);
 
         assert_eq!(tx.sender, "alice");
         assert_eq!(tx.recipient, "bob");
@@ -278,11 +275,7 @@ mod tests {
 
     #[test]
     fn test_transaction_hash() {
-        let tx = Transaction::new(
-            "alice".to_string(),
-            "bob".to_string(),
-            100,
-        );
+        let tx = Transaction::new("alice".to_string(), "bob".to_string(), 100);
 
         let hash = tx.hash();
         assert_eq!(hash.len(), 64); // SHA256 produces 64 hex characters
@@ -296,13 +289,10 @@ mod tests {
         let signing_key = SigningKey::generate(&mut OsRng);
         let private_key_hex = hex::encode(signing_key.to_bytes());
 
-        let mut tx = Transaction::new(
-            "alice".to_string(),
-            "bob".to_string(),
-            100,
-        );
+        let mut tx = Transaction::new("alice".to_string(), "bob".to_string(), 100);
 
-        tx.sign(&private_key_hex).expect("a freshly generated key must sign");
+        tx.sign(&private_key_hex)
+            .expect("a freshly generated key must sign");
         assert!(tx.signature.is_some());
     }
 
@@ -329,7 +319,11 @@ mod tests {
 
         let mut promoted = tx.clone();
         promoted.is_coinbase_tx = true;
-        assert_ne!(original, promoted.hash(), "the coinbase flag must be hashed");
+        assert_ne!(
+            original,
+            promoted.hash(),
+            "the coinbase flag must be hashed"
+        );
 
         let mut stripped = tx.clone();
         stripped.public_key = None;
@@ -345,7 +339,10 @@ mod tests {
 
         let mut relabelled = tx.clone();
         relabelled.id = Uuid::new_v4().to_string();
-        assert!(!relabelled.verify(), "a re-identified transaction must not verify");
+        assert!(
+            !relabelled.verify(),
+            "a re-identified transaction must not verify"
+        );
     }
 
     #[test]
@@ -361,7 +358,10 @@ mod tests {
         tx.sign(&hex::encode(signing_key.to_bytes()))
             .expect("a freshly generated key must sign");
 
-        assert!(!tx.verify(), "the raw public key is not a valid sender address");
+        assert!(
+            !tx.verify(),
+            "the raw public key is not a valid sender address"
+        );
     }
 
     #[test]

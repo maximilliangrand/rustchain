@@ -221,11 +221,7 @@ mod tests {
 
     #[test]
     fn test_odd_number_transactions() {
-        let hashes = vec![
-            "tx1".to_string(),
-            "tx2".to_string(),
-            "tx3".to_string(),
-        ];
+        let hashes = vec!["tx1".to_string(), "tx2".to_string(), "tx3".to_string()];
         let tree = MerkleTree::new(hashes);
 
         assert_eq!(tree.transaction_count(), 3);
@@ -296,7 +292,11 @@ mod tests {
         let tree = MerkleTree::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
         let proof = tree.generate_proof(0).expect("leaf 0 exists");
 
-        assert!(!MerkleTree::verify_proof("not_in_the_tree", &proof, &tree.root));
+        assert!(!MerkleTree::verify_proof(
+            "not_in_the_tree",
+            &proof,
+            &tree.root
+        ));
     }
 
     #[test]

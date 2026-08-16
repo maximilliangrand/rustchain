@@ -74,7 +74,7 @@ impl Block {
     /// The genesis block has no previous hash and often contains
     /// a special message or initial distribution of coins
     ///
-    /// It is fully deterministic — fixed transaction id and fixed timestamp — so
+    /// It is fully deterministic, fixed transaction id and fixed timestamp, so
     /// every node derives the identical genesis hash. Without that, two honest
     /// nodes start from different roots and are, in effect, two currencies.
     pub fn genesis() -> Self {

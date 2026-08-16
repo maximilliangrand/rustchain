@@ -6,14 +6,14 @@
 //! - Chain synchronization
 //! - Consensus (longest chain rule)
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Semaphore};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use serde::{Deserialize, Serialize};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::core::{Block, Blockchain, Transaction};
 
@@ -57,7 +57,9 @@ where
         .into());
     }
 
-    writer.write_all(&(payload.len() as u32).to_be_bytes()).await?;
+    writer
+        .write_all(&(payload.len() as u32).to_be_bytes())
+        .await?;
     writer.write_all(&payload).await?;
     writer.flush().await?;
 
@@ -116,8 +118,8 @@ pub enum Message {
     Pong,
     /// Node version/handshake.
     ///
-    /// `listen_address` is the address the sender accepts connections on — the
-    /// socket's remote address is an ephemeral port nobody can dial back — so an
+    /// `listen_address` is the address the sender accepts connections on, the
+    /// socket's remote address is an ephemeral port nobody can dial back, so an
     /// inbound peer can be recorded and propagation works in both directions.
     Version {
         version: String,
@@ -220,7 +222,8 @@ impl Node {
         local_address: Arc<String>,
     ) -> WireResult<()> {
         loop {
-            let message = match tokio::time::timeout(IDLE_TIMEOUT, read_message(&mut socket)).await {
+            let message = match tokio::time::timeout(IDLE_TIMEOUT, read_message(&mut socket)).await
+            {
                 Err(_) => {
                     log::info!("Closing idle connection");
                     break;
@@ -491,10 +494,7 @@ pub struct Client;
 
 impl Client {
     /// Send a message to a node and get response
-    pub async fn send_message(
-        addr: &str,
-        message: Message,
-    ) -> WireResult<Option<Message>> {
+    pub async fn send_message(addr: &str, message: Message) -> WireResult<Option<Message>> {
         let mut socket = TcpStream::connect(addr).await?;
 
         write_message(&mut socket, &message).await?;
@@ -545,10 +545,16 @@ mod tests {
                 .unwrap();
         });
 
-        let first = read_message(&mut server).await.unwrap().expect("a first message");
+        let first = read_message(&mut server)
+            .await
+            .unwrap()
+            .expect("a first message");
         assert!(matches!(first, Message::Ping));
 
-        let second = read_message(&mut server).await.unwrap().expect("a second message");
+        let second = read_message(&mut server)
+            .await
+            .unwrap()
+            .expect("a second message");
         match second {
             Message::Peers(peers) => assert_eq!(peers, expected),
             other => panic!("expected a peer list, got {:?}", other),
@@ -568,7 +574,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_message_is_refused_before_it_is_read() {
         // The size limit is checked against the length prefix, so it can
-        // actually fire — the old check compared against a read that could never
+        // actually fire, the old check compared against a read that could never
         // exceed the buffer it read into.
         let (mut client, mut server) = tokio::io::duplex(64);
 

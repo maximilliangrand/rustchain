@@ -6,8 +6,8 @@
 //! - UTXO set (balances) tracking
 //! - Mempool for pending transactions
 
-use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 use super::block::Block;
@@ -211,7 +211,11 @@ impl Blockchain {
         }
 
         // Verify coinbase: must have exactly one, and reward must not exceed allowed amount
-        let coinbase_txs: Vec<_> = block.transactions.iter().filter(|tx| tx.is_coinbase()).collect();
+        let coinbase_txs: Vec<_> = block
+            .transactions
+            .iter()
+            .filter(|tx| tx.is_coinbase())
+            .collect();
         if coinbase_txs.len() != 1 {
             return Err(format!(
                 "Block must have exactly 1 coinbase transaction, has {}",
@@ -293,7 +297,9 @@ impl Blockchain {
             .map(|tx| tx.amount)
             .sum();
 
-        let available = self.get_balance(&transaction.sender).saturating_sub(pending_spent);
+        let available = self
+            .get_balance(&transaction.sender)
+            .saturating_sub(pending_spent);
         if !transaction.is_coinbase() && available < transaction.amount {
             return Err(BlockchainError::InsufficientBalance {
                 has: available,
@@ -384,7 +390,7 @@ impl Blockchain {
             .map_err(BlockchainError::InvalidBlock)?;
 
         // Apply the block to a copy of the ledger. This is where a block that
-        // spends coins nobody has, or repeats a transaction id, is refused —
+        // spends coins nobody has, or repeats a transaction id, is refused,
         // signatures and proof-of-work alone say nothing about affordability.
         let mut balances = self.balances.clone();
         let mut spent_tx_ids = self.spent_tx_ids.clone();
@@ -402,7 +408,7 @@ impl Blockchain {
     /// 4. All transactions are valid, unique, and affordable
     ///
     /// This is what `rustchain validate` reports, so it has to enforce every
-    /// rule block acceptance enforces — anything it skips is a rule an attacker
+    /// rule block acceptance enforces, anything it skips is a rule an attacker
     /// can hand us a chain without.
     pub fn is_valid(&self) -> Result<(), BlockchainError> {
         if self.chain.is_empty() {
@@ -614,17 +620,16 @@ mod tests {
     fn test_add_transaction() {
         let mut bc = create_test_blockchain();
 
-        let mut tx = Transaction::new(
-            "genesis_address".to_string(),
-            "bob".to_string(),
-            100,
-        );
+        let mut tx = Transaction::new("genesis_address".to_string(), "bob".to_string(), 100);
         // A malformed key is rejected as an error, not a panic.
         assert_eq!(
             tx.sign("genesis_private_key"),
             Err(SignError::InvalidHex("Odd number of digits".to_string()))
         );
-        assert!(tx.signature.is_none(), "a failed signing must not mutate the transaction");
+        assert!(
+            tx.signature.is_none(),
+            "a failed signing must not mutate the transaction"
+        );
 
         // An unsigned transaction is refused by the chain.
         assert!(bc.add_transaction(tx).is_err());
@@ -634,11 +639,7 @@ mod tests {
     fn test_insufficient_balance() {
         let mut bc = create_test_blockchain();
 
-        let mut tx = Transaction::new(
-            "empty_address".to_string(),
-            "bob".to_string(),
-            100,
-        );
+        let mut tx = Transaction::new("empty_address".to_string(), "bob".to_string(), 100);
         // With real crypto, this would need a valid ed25519 key
         tx.signature = Some("dummy".to_string());
 
@@ -711,7 +712,7 @@ mod tests {
         // Regression (CVE-2012-2459): the Merkle tree padded odd levels by
         // duplicating the last leaf, so [coinbase, filler, pay] and
         // [coinbase, filler, pay, pay] had the same root and therefore the same
-        // block hash — a way to mint coins by repeating a payment.
+        // block hash, a way to mint coins by repeating a payment.
         let mut bc = create_test_blockchain();
         let alice = Wallet::new();
         mine(&mut bc, &alice.address);
@@ -724,14 +725,9 @@ mod tests {
             .expect("a generated wallet key must sign");
         let coinbase = Transaction::coinbase("miner".to_string(), bc.mining_reward);
 
-        let honest = mined_block_on_tip(
-            &bc,
-            vec![coinbase.clone(), filler.clone(), payment.clone()],
-        );
-        let doubled = mined_block_on_tip(
-            &bc,
-            vec![coinbase, filler, payment.clone(), payment],
-        );
+        let honest =
+            mined_block_on_tip(&bc, vec![coinbase.clone(), filler.clone(), payment.clone()]);
+        let doubled = mined_block_on_tip(&bc, vec![coinbase, filler, payment.clone(), payment]);
 
         assert_ne!(
             honest.merkle_root, doubled.merkle_root,
@@ -754,7 +750,10 @@ mod tests {
         let tx = pauper
             .create_transaction("recipient", 1_000_000)
             .expect("a generated wallet key must sign");
-        assert!(bc.add_transaction(tx.clone()).is_err(), "the mempool refuses it");
+        assert!(
+            bc.add_transaction(tx.clone()).is_err(),
+            "the mempool refuses it"
+        );
 
         let coinbase = Transaction::coinbase("miner".to_string(), bc.mining_reward);
         let block = mined_block_on_tip(&bc, vec![coinbase, tx]);
@@ -803,7 +802,7 @@ mod tests {
     #[test]
     fn promoting_a_payment_to_a_coinbase_is_detected() {
         // Regression: hash() omitted is_coinbase_tx and public_key, so a payment
-        // could be turned into a coinbase — which skips signature checks — with
+        // could be turned into a coinbase, which skips signature checks, with
         // no change to the Merkle root or the block hash.
         let mut bc = create_test_blockchain();
         let alice = Wallet::new();
@@ -833,15 +832,22 @@ mod tests {
             .create_transaction("bob", 10)
             .expect("a generated wallet key must sign");
 
-        bc.add_transaction(tx.clone()).expect("the first submission is valid");
+        bc.add_transaction(tx.clone())
+            .expect("the first submission is valid");
         mine(&mut bc, "miner");
         assert_eq!(bc.get_balance("bob"), 10);
 
-        assert!(bc.add_transaction(tx.clone()).is_err(), "the mempool refuses a replay");
+        assert!(
+            bc.add_transaction(tx.clone()).is_err(),
+            "the mempool refuses a replay"
+        );
 
         let coinbase = Transaction::coinbase("miner".to_string(), bc.mining_reward);
         let replay_block = mined_block_on_tip(&bc, vec![coinbase, tx]);
-        assert!(bc.add_block(replay_block).is_err(), "a block replaying it is refused");
+        assert!(
+            bc.add_block(replay_block).is_err(),
+            "a block replaying it is refused"
+        );
         assert_eq!(bc.get_balance("bob"), 10);
     }
 
@@ -857,7 +863,8 @@ mod tests {
         let tx = alice
             .create_transaction("bob", 10)
             .expect("a generated wallet key must sign");
-        bc.add_transaction(tx.clone()).expect("alice can afford 10 coins");
+        bc.add_transaction(tx.clone())
+            .expect("alice can afford 10 coins");
 
         let restored = Blockchain::from_json(&bc.to_json().unwrap()).unwrap();
 

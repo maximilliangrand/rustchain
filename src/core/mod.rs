@@ -6,12 +6,12 @@
 //! - Merkle Trees: Efficient verification of transaction integrity
 //! - Blockchain: The chain of blocks with validation logic
 
-pub mod transaction;
 pub mod block;
-pub mod merkle;
 pub mod blockchain;
+pub mod merkle;
+pub mod transaction;
 
-pub use transaction::Transaction;
 pub use block::Block;
-pub use merkle::MerkleTree;
 pub use blockchain::Blockchain;
+pub use merkle::MerkleTree;
+pub use transaction::Transaction;
