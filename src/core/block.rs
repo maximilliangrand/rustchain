@@ -6,13 +6,14 @@
 //! - Transactions: List of transactions included in the block
 //! - Previous hash: Hash of the previous block (creates the chain)
 //! - Merkle root: Root hash of all transactions for efficient verification
+//! - Difficulty: The proof-of-work difficulty this block was mined at
 //! - Nonce: Proof-of-work solution
 //! - Hash: The block's own hash
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use super::hashing::{CanonicalEncoding, BLOCK_HASH_DOMAIN};
 use super::merkle::MerkleTree;
 use super::transaction::Transaction;
 
@@ -29,6 +30,14 @@ pub struct Block {
     pub previous_hash: String,
     /// Merkle root of all transactions
     pub merkle_root: String,
+    /// Proof-of-work difficulty this block claims to have been mined at.
+    ///
+    /// Part of the hash preimage, so it cannot be relabelled after mining, and
+    /// checked against the difficulty the chain rules demand at this height,
+    /// a block does not get to choose how hard it was.
+    ///
+    /// Zero on an unmined block, including the genesis block.
+    pub difficulty: usize,
     /// Proof-of-work nonce
     pub nonce: u64,
     /// This block's hash
@@ -61,6 +70,7 @@ impl Block {
             transactions,
             previous_hash,
             merkle_root: merkle_tree.root,
+            difficulty: 0,
             nonce: 0,
             hash: String::new(),
         };
@@ -74,7 +84,7 @@ impl Block {
     /// The genesis block has no previous hash and often contains
     /// a special message or initial distribution of coins
     ///
-    /// It is fully deterministic — fixed transaction id and fixed timestamp — so
+    /// It is fully deterministic, fixed transaction id and fixed timestamp, so
     /// every node derives the identical genesis hash. Without that, two honest
     /// nodes start from different roots and are, in effect, two currencies.
     pub fn genesis() -> Self {
@@ -91,25 +101,32 @@ impl Block {
 
     /// Calculate the hash of this block
     ///
-    /// The hash is computed from: index + timestamp + merkle_root + previous_hash + nonce
+    /// The preimage is the `CanonicalEncoding` of, in order: the domain tag
+    /// `BLOCK_HASH_DOMAIN`, `index`, `timestamp`, `merkle_root`,
+    /// `previous_hash`, `difficulty` and `nonce`. Every field carries its own
+    /// length, which is what makes the header a function of its fields: the
+    /// previous encoding pasted them together with nothing in between, so the
+    /// header (difficulty 1, nonce 23) and the header (difficulty 12, nonce 3)
+    /// hashed identically, one proof-of-work standing for two different claims
+    /// about how hard the block was.
     pub fn calculate_hash(&self) -> String {
-        let block_data = format!(
-            "{}{}{}{}{}",
-            self.index,
-            self.timestamp.timestamp_nanos_opt().unwrap_or(0),
-            self.merkle_root,
-            self.previous_hash,
-            self.nonce
-        );
-
-        let mut hasher = Sha256::new();
-        hasher.update(block_data.as_bytes());
-        hex::encode(hasher.finalize())
+        CanonicalEncoding::new(BLOCK_HASH_DOMAIN)
+            .integer(self.index)
+            .time(&self.timestamp)
+            .text(&self.merkle_root)
+            .text(&self.previous_hash)
+            .integer(self.difficulty as u64)
+            .integer(self.nonce)
+            .hash_hex()
     }
 
     /// Mine the block using Proof-of-Work
     ///
     /// Finds a nonce such that the block hash starts with `difficulty` zeros
+    ///
+    /// The difficulty is recorded on the block before the search starts, so it
+    /// is covered by the proof-of-work it describes: a mined block cannot later
+    /// be relabelled with a cheaper difficulty without invalidating its hash.
     ///
     /// # Arguments
     /// * `difficulty` - Number of leading zeros required in the hash
@@ -127,6 +144,8 @@ impl Block {
     /// assert!(block.hash.starts_with("00"));
     /// ```
     pub fn mine(&mut self, difficulty: usize) -> u64 {
+        self.difficulty = difficulty;
+
         let target = "0".repeat(difficulty);
         let mut iterations = 0u64;
 
@@ -196,12 +215,17 @@ impl Block {
     }
 
     /// Get the total value transferred in this block (excluding coinbase)
+    ///
+    /// A `Block` is deserialized straight off the wire, before any validation
+    /// says the amounts are affordable, so the running total is saturated
+    /// rather than summed: two transactions of `u64::MAX / 2 + 1` are a report
+    /// that reads `u64::MAX`, not a panicking node.
     pub fn total_value(&self) -> u64 {
         self.transactions
             .iter()
             .filter(|tx| !tx.is_coinbase())
             .map(|tx| tx.amount)
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Get the mining reward (coinbase amount) in this block
@@ -273,6 +297,50 @@ mod tests {
     }
 
     #[test]
+    fn mining_records_the_difficulty_it_used() {
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        assert_eq!(block.difficulty, 0, "an unmined block claims no work");
+
+        block.mine(2);
+
+        assert_eq!(block.difficulty, 2);
+    }
+
+    #[test]
+    fn the_claimed_difficulty_is_committed_to_the_hash() {
+        // The claimed difficulty is only meaningful if it is covered by the
+        // proof-of-work: otherwise a block mined at difficulty 1 could be
+        // relabelled as difficulty 5 and pass a chain that demands 5.
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        block.mine(2);
+        assert!(block.verify_hash(Some(2)));
+
+        block.difficulty = 5;
+
+        assert!(
+            !block.verify_hash(None),
+            "relabelling the difficulty must break the block hash"
+        );
+    }
+
+    #[test]
+    fn adjacent_header_fields_cannot_be_re_split() {
+        // Regression: the header preimage was its fields concatenated with no
+        // separator at all, so (difficulty 1, nonce 23) and (difficulty 12,
+        // nonce 3) were the same bytes, a single proof-of-work standing for two
+        // different claims about the difficulty the block was mined at.
+        let mut cheap = Block::new(1, vec![], "prev".to_string());
+        cheap.difficulty = 1;
+        cheap.nonce = 23;
+
+        let mut relabelled = cheap.clone();
+        relabelled.difficulty = 12;
+        relabelled.nonce = 3;
+
+        assert_ne!(cheap.calculate_hash(), relabelled.calculate_hash());
+    }
+
+    #[test]
     fn test_verify_hash() {
         let tx = Transaction::new("alice".into(), "bob".into(), 100);
         let mut block = Block::new(1, vec![tx], "prev".to_string());
@@ -310,5 +378,23 @@ mod tests {
 
         assert_eq!(block.total_value(), 300);
         assert_eq!(block.mining_reward(), 50);
+    }
+
+    #[test]
+    fn total_value_saturates_instead_of_overflowing() {
+        // Found by `cargo fuzz run block_deserialize`: a block arrives as bytes,
+        // and nothing has yet said its amounts are affordable, so summing them
+        // used to abort the process on any pair adding past u64::MAX.
+        let half = u64::MAX / 2 + 1;
+        let block = Block::new(
+            1,
+            vec![
+                Transaction::new("a".into(), "b".into(), half),
+                Transaction::new("c".into(), "d".into(), half),
+            ],
+            "prev".to_string(),
+        );
+
+        assert_eq!(block.total_value(), u64::MAX);
     }
 }

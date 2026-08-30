@@ -5,15 +5,22 @@
 //! - Address generation
 //! - Transaction signing
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use crate::core::transaction::{derive_address, SignError};
 use crate::core::Transaction;
 
 /// Represents a wallet with key pairs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented by hand rather than derived so the private key never
+/// reaches a log line or a panic message: a derived `Debug` would print it in
+/// full. Export stays explicit through `Serialize`/[`Wallet::to_json`], which a
+/// caller has to ask for.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Wallet {
     /// Wallet address (public key hash)
     pub address: String,
@@ -21,6 +28,16 @@ pub struct Wallet {
     private_key: String,
     /// Public key (ed25519 verifying key, hex-encoded)
     pub public_key: String,
+}
+
+impl fmt::Debug for Wallet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Wallet")
+            .field("address", &self.address)
+            .field("private_key", &"<redacted>")
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 impl Wallet {
@@ -85,11 +102,7 @@ impl Wallet {
         recipient: &str,
         amount: u64,
     ) -> Result<Transaction, SignError> {
-        let mut tx = Transaction::new(
-            self.address.clone(),
-            recipient.to_string(),
-            amount,
-        );
+        let mut tx = Transaction::new(self.address.clone(), recipient.to_string(), amount);
         tx.sign(&self.private_key)?;
         Ok(tx)
     }
@@ -137,8 +150,8 @@ mod tests {
     #[test]
     fn test_from_private_key() {
         let wallet1 = Wallet::new();
-        let wallet2 = Wallet::from_private_key(&wallet1.private_key)
-            .expect("a wallet's own key must import");
+        let wallet2 =
+            Wallet::from_private_key(&wallet1.private_key).expect("a wallet's own key must import");
 
         assert_eq!(wallet1.address, wallet2.address);
         assert_eq!(wallet1.public_key, wallet2.public_key);
@@ -213,6 +226,20 @@ mod tests {
         let restored = Wallet::from_json(&json).unwrap();
 
         assert_eq!(wallet.address, restored.address);
+    }
+
+    #[test]
+    fn debug_never_reveals_the_private_key() {
+        // A derived Debug would print the signing key straight into any log line
+        // or panic message that formatted a wallet.
+        let wallet = Wallet::new();
+        let rendered = format!("{:?}", wallet);
+
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            !rendered.contains(&wallet.private_key),
+            "the private key must never appear in Debug output"
+        );
     }
 
     #[test]

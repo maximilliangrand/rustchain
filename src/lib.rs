@@ -58,10 +58,19 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-pub mod core;
-pub mod wallet;
-pub mod network;
+#![warn(missing_docs)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result
+)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod cli;
+pub mod core;
+pub mod network;
+pub mod wallet;
 
 pub use core::{Block, Blockchain, MerkleTree, Transaction};
 pub use wallet::Wallet;

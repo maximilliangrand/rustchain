@@ -13,8 +13,7 @@ use std::path::PathBuf;
 /// RustChain - A blockchain implementation in Rust
 #[derive(Parser)]
 #[command(name = "rustchain")]
-#[command(author = "Your Name")]
-#[command(version = "0.1.0")]
+#[command(author, version)]
 #[command(about = "A blockchain implementation from scratch in Rust", long_about = None)]
 pub struct Cli {
     /// Sets a custom config file
@@ -25,15 +24,17 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub debug: u8,
 
+    /// The subcommand to run
     #[command(subcommand)]
     pub command: Commands,
 }
 
+/// The top-level commands `rustchain` accepts
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new blockchain
     Init {
-        /// Mining difficulty (number of leading zeros)
+        /// Starting mining difficulty (number of leading zeros); retargets from there
         #[arg(short, long, default_value = "4")]
         difficulty: usize,
 
@@ -44,12 +45,14 @@ pub enum Commands {
 
     /// Create a new wallet
     Wallet {
+        /// The wallet operation to run
         #[command(subcommand)]
         action: WalletCommands,
     },
 
     /// Transaction operations
     Transaction {
+        /// The transaction operation to run
         #[command(subcommand)]
         action: TransactionCommands,
     },
@@ -126,6 +129,7 @@ pub enum Commands {
     },
 }
 
+/// Wallet operations: key generation, inspection and import
 #[derive(Subcommand)]
 pub enum WalletCommands {
     /// Create a new wallet
@@ -153,6 +157,7 @@ pub enum WalletCommands {
     },
 }
 
+/// Transaction operations: creation, the mempool, and history
 #[derive(Subcommand)]
 pub enum TransactionCommands {
     /// Create a new transaction

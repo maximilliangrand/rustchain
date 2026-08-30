@@ -2,6 +2,7 @@
 name = "rustchain"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.90"
 authors = ["Maxim Gagiev <maximgagiev@myg-media.com>"]
 description = "A blockchain implementation from scratch in Rust - educational & portfolio project"
 repository = "https://github.com/maximilliangrand/rustchain"
@@ -41,10 +42,16 @@ anyhow = "1.0"
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1.11.0"
 
 [[bin]]
 name = "rustchain"
 path = "src/main.rs"
+
+# Criterion brings its own harness, so the built-in test harness is turned off.
+[[bench]]
+name = "core"
+harness = false
 
 [profile.release]
 opt-level = 3

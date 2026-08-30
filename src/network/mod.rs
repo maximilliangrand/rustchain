@@ -4,16 +4,16 @@
 //! - Node discovery and connection
 //! - Block and transaction propagation
 //! - Chain synchronization
-//! - Consensus (longest chain rule)
+//! - Consensus (heaviest-work chain rule)
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Semaphore};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use serde::{Deserialize, Serialize};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::core::{Block, Blockchain, Transaction};
 
@@ -32,8 +32,18 @@ const MAX_TXS_PER_BLOCK: usize = 1000;
 /// Maximum number of simultaneous inbound connections
 const MAX_INBOUND_CONNECTIONS: usize = 64;
 
+/// Largest number of peer addresses the node will hold.
+///
+/// Every recorded address is a host this node may later dial, so the table is
+/// capped: a peer cannot grow it without bound, and an unbounded table is both a
+/// memory cost and a way to crowd honest peers out.
+const MAX_PEERS: usize = 1024;
+
 /// How long a connection may sit idle before it is dropped
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for a peer to answer a request we made
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Result type for the framed wire protocol
 pub type WireResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -57,7 +67,9 @@ where
         .into());
     }
 
-    writer.write_all(&(payload.len() as u32).to_be_bytes()).await?;
+    writer
+        .write_all(&(payload.len() as u32).to_be_bytes())
+        .await?;
     writer.write_all(&payload).await?;
     writer.flush().await?;
 
@@ -116,12 +128,15 @@ pub enum Message {
     Pong,
     /// Node version/handshake.
     ///
-    /// `listen_address` is the address the sender accepts connections on — the
-    /// socket's remote address is an ephemeral port nobody can dial back — so an
+    /// `listen_address` is the address the sender accepts connections on, the
+    /// socket's remote address is an ephemeral port nobody can dial back, so an
     /// inbound peer can be recorded and propagation works in both directions.
     Version {
+        /// The sender's crate version.
         version: String,
+        /// The height of the sender's chain, so a peer can tell who is behind.
         height: u64,
+        /// The address the sender accepts connections on.
         listen_address: String,
     },
 }
@@ -164,9 +179,35 @@ impl Node {
         self
     }
 
+    /// Bind the listening socket and learn the address the node actually got.
+    ///
+    /// [`Self::start`] binds and serves in a single call, which leaves a caller
+    /// that asked for port 0 no way to discover the port the OS handed out,
+    /// and worse, it would keep advertising `:0` in its handshake, telling
+    /// every peer to dial an address that does not exist. Binding as its own
+    /// step closes both: the node's address is rewritten to the bound one
+    /// before anything can quote it, and the returned listener is already
+    /// accepting, so a caller knows the node is reachable without polling.
+    pub async fn bind(&mut self) -> WireResult<TcpListener> {
+        let listener = TcpListener::bind(&self.address).await?;
+        let bound = listener.local_addr()?;
+
+        self.address = bound.to_string();
+        self.port = bound.port();
+
+        Ok(listener)
+    }
+
     /// Start the node server
     pub async fn start(&self) -> WireResult<()> {
         let listener = TcpListener::bind(&self.address).await?;
+        self.serve(listener).await
+    }
+
+    /// Serve connections on a listener that is already bound.
+    ///
+    /// Runs until the future is dropped; it has no other exit.
+    pub async fn serve(&self, listener: TcpListener) -> WireResult<()> {
         log::info!("Node listening on {}", self.address);
 
         let connection_slots = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTIONS));
@@ -220,7 +261,8 @@ impl Node {
         local_address: Arc<String>,
     ) -> WireResult<()> {
         loop {
-            let message = match tokio::time::timeout(IDLE_TIMEOUT, read_message(&mut socket)).await {
+            let message = match tokio::time::timeout(IDLE_TIMEOUT, read_message(&mut socket)).await
+            {
                 Err(_) => {
                     log::info!("Closing idle connection");
                     break;
@@ -271,7 +313,9 @@ impl Node {
         match message {
             Message::GetLatestBlock => {
                 let bc = blockchain.read().await;
-                Some(Message::LatestBlock(bc.latest_block().clone()))
+                // A node with no chain simply has nothing to answer with; the
+                // peer gets silence rather than a crash.
+                bc.latest_block().cloned().map(Message::LatestBlock)
             }
 
             Message::GetBlockchain => {
@@ -280,16 +324,21 @@ impl Node {
             }
 
             Message::NewBlock(block) => {
-                let accepted = {
+                let (accepted, orphaned) = {
                     let mut bc = blockchain.write().await;
                     match bc.add_block(block.clone()) {
                         Ok(()) => {
                             log::info!("Added new block {} from network", block.index);
-                            true
+                            (true, false)
                         }
                         Err(e) => {
                             log::warn!("Failed to add received block: {}", e);
-                            false
+                            // A block at or beyond our own tip that will not
+                            // attach is the signal that this node is on the
+                            // losing side of a fork: the history the block
+                            // needs is history we do not have, and the block
+                            // alone carries no way to get it.
+                            (false, block.index as usize >= bc.len())
                         }
                     }
                 };
@@ -297,6 +346,8 @@ impl Node {
                 if accepted {
                     Self::persist(blockchain, storage_path).await;
                     Self::broadcast_to_peers(peers, Message::NewBlock(block)).await;
+                } else if orphaned {
+                    Self::reconverge(blockchain, peers, storage_path, local_address).await;
                 }
                 None
             }
@@ -343,8 +394,20 @@ impl Node {
                 );
 
                 // Remember the peer, otherwise propagation is one-way: we would
-                // only ever push to peers named on our own command line.
-                peers.write().await.insert(listen_address);
+                // only ever push to peers named on our own command line. This is
+                // the counterparty's own claimed address, validated and bounded
+                // like any other; it is recorded, not authenticated.
+                Self::record_peer(peers, &listen_address).await;
+
+                // A peer that announces a longer chain is a fork to resolve
+                // now, not whenever somebody next mines: a node joining a
+                // running network has to converge on contact, and the dialling
+                // side cannot do this for us, it only learns our height from
+                // the reply we are about to send.
+                let behind = blockchain.read().await.len() < height as usize;
+                if behind {
+                    Self::reconverge(blockchain, peers, storage_path, local_address).await;
+                }
 
                 let bc = blockchain.read().await;
                 Some(Message::Version {
@@ -372,6 +435,89 @@ impl Node {
                 }
             }
             Err(e) => log::error!("Failed to serialize blockchain: {}", e),
+        }
+    }
+
+    /// Ask one peer for its full chain over a fresh connection.
+    ///
+    /// `Ok(None)` means the peer answered something other than a chain, which
+    /// is its right, only a transport or framing failure is an error.
+    async fn request_chain(peer: &str) -> WireResult<Option<Vec<Block>>> {
+        let mut socket = TcpStream::connect(peer).await?;
+        write_message(&mut socket, &Message::GetBlockchain).await?;
+
+        // A peer that accepts the request and then says nothing must not pin
+        // this task forever: the caller may be holding up a handshake.
+        match tokio::time::timeout(REQUEST_TIMEOUT, read_message(&mut socket)).await {
+            Ok(Ok(Some(Message::FullBlockchain(chain)))) => Ok(Some(chain)),
+            Ok(Ok(_)) => Ok(None),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(format!("peer {} did not answer in time", peer).into()),
+        }
+    }
+
+    /// Pull every known peer's chain and adopt the heaviest valid one.
+    ///
+    /// Reconvergence needs a pull as well as a push. Broadcasting a block tells
+    /// a peer that a better chain exists but not what is in it, so a node that
+    /// forked more than one block back can never catch up on gossip alone. This
+    /// closes the gap, and [`Blockchain::replace_chain`], not this function,
+    /// decides: a candidate is adopted only if it is rooted in our own genesis,
+    /// valid block for block, and carries strictly more work than what we hold.
+    async fn reconverge(
+        blockchain: &Arc<RwLock<Blockchain>>,
+        peers: &Arc<RwLock<HashSet<String>>>,
+        storage_path: &Option<Arc<PathBuf>>,
+        local_address: &str,
+    ) {
+        let targets: Vec<String> = {
+            let peer_list = peers.read().await;
+            peer_list
+                .iter()
+                .filter(|peer| peer.as_str() != local_address)
+                .cloned()
+                .collect()
+        };
+
+        for peer in targets {
+            let offered = match Self::request_chain(&peer).await {
+                Ok(Some(chain)) => chain,
+                Ok(None) => continue,
+                Err(e) => {
+                    log::warn!("Failed to fetch the chain of peer {}: {}", peer, e);
+                    continue;
+                }
+            };
+
+            // The whole chain is in hand before the write lock is taken: a peer
+            // that stalls mid-transfer must not freeze this node's own mining.
+            // `replace_chain`, not a length test here, decides: it validates the
+            // candidate and adopts it only if it carries strictly more work, so
+            // a longer-but-lighter chain is refused rather than raced onto.
+            let adopted = {
+                let mut bc = blockchain.write().await;
+                let offered_len = offered.len();
+                match bc.replace_chain(offered) {
+                    Ok(()) => {
+                        log::info!(
+                            "Reconverged on the chain of peer {} ({} blocks)",
+                            peer,
+                            offered_len
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        // A chain no heavier than ours is the common case, not a
+                        // fault, so this stays at debug.
+                        log::debug!("Did not adopt the chain offered by {}: {}", peer, e);
+                        false
+                    }
+                }
+            };
+
+            if adopted {
+                Self::persist(blockchain, storage_path).await;
+            }
         }
     }
 
@@ -411,6 +557,55 @@ impl Node {
         }
     }
 
+    /// Record a peer address, if it is well-formed and there is room.
+    ///
+    /// Addresses reach us from untrusted handshakes, and every recorded address
+    /// is a host this node may later dial, so an unparseable string is dropped
+    /// and the table is capped at [`MAX_PEERS`]. This keeps a peer from steering
+    /// the node at an arbitrary or malformed target and from growing the table
+    /// without bound. It does not authenticate the address: see the eclipse and
+    /// SSRF notes in `docs/THREAT-MODEL.md`.
+    async fn record_peer(peers: &Arc<RwLock<HashSet<String>>>, addr: &str) -> bool {
+        if addr.parse::<std::net::SocketAddr>().is_err() {
+            log::warn!(
+                "Ignoring a peer address that is not a socket address: {}",
+                addr
+            );
+            return false;
+        }
+
+        let mut set = peers.write().await;
+        if set.contains(addr) {
+            return false;
+        }
+        if set.len() >= MAX_PEERS {
+            log::warn!(
+                "Peer table is full ({} entries); dropping {}",
+                MAX_PEERS,
+                addr
+            );
+            return false;
+        }
+        set.insert(addr.to_string())
+    }
+
+    /// Read one message from `socket`, failing if the peer does not answer in
+    /// time.
+    ///
+    /// Every read this node makes after sending a request is bounded by
+    /// [`REQUEST_TIMEOUT`]: a peer that accepts the connection and then goes
+    /// silent must not pin the task, which may be holding up a handshake.
+    async fn read_with_timeout(
+        socket: &mut TcpStream,
+        peer_addr: &str,
+        what: &str,
+    ) -> WireResult<Option<Message>> {
+        match tokio::time::timeout(REQUEST_TIMEOUT, read_message(socket)).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("peer {} did not answer the {} in time", peer_addr, what).into()),
+        }
+    }
+
     /// Connect to a peer
     pub async fn connect_to_peer(&self, peer_addr: &str) -> WireResult<()> {
         let mut socket = TcpStream::connect(peer_addr).await?;
@@ -418,20 +613,37 @@ impl Node {
         // Send version message
         let version_msg = self.version_message().await;
         write_message(&mut socket, &version_msg).await?;
-        let _ = read_message(&mut socket).await?;
+        let their_version = Self::read_with_timeout(&mut socket, peer_addr, "handshake").await?;
 
-        // Add to peers
-        self.peers.write().await.insert(peer_addr.to_string());
+        // Record the peer we explicitly dialled. It is validated and bounded
+        // like any other, but unlike an advertised address it is one the
+        // operator chose to trust.
+        Self::record_peer(&self.peers, peer_addr).await;
         log::info!("Connected to peer: {}", peer_addr);
 
-        // Learn about the peer's peers
+        // Ask for the peer's peers, but do not add them to our own table. An
+        // address a peer merely advertises is a host we would then dial, so
+        // auto-dialling it turns any peer into a way to point this node at an
+        // arbitrary target. Discovery is deliberately limited to explicitly
+        // configured peers and to the peers we are directly handshaking with.
         write_message(&mut socket, &Message::GetPeers).await?;
-        if let Some(Message::Peers(known)) = read_message(&mut socket).await? {
-            let mut peers = self.peers.write().await;
-            for peer in known {
-                if peer != self.address {
-                    peers.insert(peer);
-                }
+        if let Some(Message::Peers(known)) =
+            Self::read_with_timeout(&mut socket, peer_addr, "peer list").await?
+        {
+            log::debug!(
+                "Peer {} advertised {} addresses (not auto-dialled)",
+                peer_addr,
+                known.len()
+            );
+        }
+
+        // The handshake already told us who is ahead, so a node joining a
+        // running network converges here rather than waiting for the next block
+        // anybody happens to mine.
+        if let Some(Message::Version { height, .. }) = their_version {
+            let local_height = self.blockchain.read().await.len();
+            if height as usize > local_height {
+                self.sync_with_peer(peer_addr).await?;
             }
         }
 
@@ -449,37 +661,38 @@ impl Node {
     }
 
     /// Synchronize blockchain with a peer
+    ///
+    /// The peer's chain replaces ours only if it validates *and* carries more
+    /// work; a lighter or malformed offer leaves this node exactly as it was.
     pub async fn sync_with_peer(&self, peer_addr: &str) -> WireResult<()> {
-        let mut socket = TcpStream::connect(peer_addr).await?;
+        let Some(chain) = Self::request_chain(peer_addr).await? else {
+            return Ok(());
+        };
 
-        // Request full blockchain
-        write_message(&mut socket, &Message::GetBlockchain).await?;
-
-        // Read response
-        if let Some(Message::FullBlockchain(chain)) = read_message(&mut socket).await? {
-            let replaced = {
-                let mut bc = self.blockchain.write().await;
-                if chain.len() > bc.len() {
+        let replaced = {
+            let mut bc = self.blockchain.write().await;
+            let offered_len = chain.len();
+            // `replace_chain` adopts the offer only if it validates and carries
+            // strictly more work than what we hold, so the comparison is by
+            // work, not by length.
+            match bc.replace_chain(chain) {
+                Ok(()) => {
                     log::info!(
-                        "Received longer chain ({} vs {}), replacing...",
-                        chain.len(),
-                        bc.len()
+                        "Adopted a heavier chain from {} ({} blocks)",
+                        peer_addr,
+                        offered_len
                     );
-                    match bc.replace_chain(chain) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            log::error!("Failed to replace chain: {}", e);
-                            false
-                        }
-                    }
-                } else {
+                    true
+                }
+                Err(e) => {
+                    log::debug!("Did not adopt the chain from {}: {}", peer_addr, e);
                     false
                 }
-            };
-
-            if replaced {
-                Self::persist(&self.blockchain, &self.storage_path).await;
             }
+        };
+
+        if replaced {
+            Self::persist(&self.blockchain, &self.storage_path).await;
         }
 
         Ok(())
@@ -491,10 +704,7 @@ pub struct Client;
 
 impl Client {
     /// Send a message to a node and get response
-    pub async fn send_message(
-        addr: &str,
-        message: Message,
-    ) -> WireResult<Option<Message>> {
+    pub async fn send_message(addr: &str, message: Message) -> WireResult<Option<Message>> {
         let mut socket = TcpStream::connect(addr).await?;
 
         write_message(&mut socket, &message).await?;
@@ -545,10 +755,16 @@ mod tests {
                 .unwrap();
         });
 
-        let first = read_message(&mut server).await.unwrap().expect("a first message");
+        let first = read_message(&mut server)
+            .await
+            .unwrap()
+            .expect("a first message");
         assert!(matches!(first, Message::Ping));
 
-        let second = read_message(&mut server).await.unwrap().expect("a second message");
+        let second = read_message(&mut server)
+            .await
+            .unwrap()
+            .expect("a second message");
         match second {
             Message::Peers(peers) => assert_eq!(peers, expected),
             other => panic!("expected a peer list, got {:?}", other),
@@ -568,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_message_is_refused_before_it_is_read() {
         // The size limit is checked against the length prefix, so it can
-        // actually fire — the old check compared against a read that could never
+        // actually fire, the old check compared against a read that could never
         // exceed the buffer it read into.
         let (mut client, mut server) = tokio::io::duplex(64);
 
@@ -603,6 +819,25 @@ mod tests {
             .unwrap();
 
         assert!(matches!(response, Some(Message::Pong)));
+    }
+
+    #[tokio::test]
+    async fn binding_port_zero_rewrites_the_advertised_address() {
+        // A node bound to an OS-chosen port has to learn the port it got:
+        // otherwise it keeps announcing `:0` in its handshake and every peer
+        // records an address that can never be dialled back.
+        let mut node = Node::new(Blockchain::with_difficulty(2), 0);
+        let listener = node.bind().await.unwrap();
+        let bound = listener.local_addr().unwrap();
+
+        assert_ne!(node.port, 0);
+        assert_eq!(node.port, bound.port());
+        assert_eq!(node.address, bound.to_string());
+
+        let Message::Version { listen_address, .. } = node.version_message().await else {
+            panic!("a version message");
+        };
+        assert_eq!(listen_address, node.address);
     }
 
     #[tokio::test]
