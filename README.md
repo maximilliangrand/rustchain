@@ -87,7 +87,7 @@ cargo test
 
 `tests/properties.rs` checks the consensus invariants against randomized inputs
 rather than hand-picked ones: a mined chain stays valid and conserves coins,
-`replace_chain` adopts a candidate exactly when it is longer *and* valid, a
+`replace_chain` adopts a valid candidate only when it has strictly greater accumulated work, a
 sender can never commit more than it holds, every Merkle proof verifies against
 its own root, and a signature verifies only while its payload is untouched.
 These run as part of `cargo test`.
@@ -401,8 +401,9 @@ This implementation is designed to demonstrate blockchain concepts clearly. In a
 design, double-spend, majority hashpower, eclipse and Sybil attacks on the peer layer, DoS
 through malformed or oversized messages, timestamp manipulation, replay, signature
 malleability and hash ambiguity, and says for each one what the code does, or admits that it
-does nothing. The four largest open gaps are length-based fork choice, an unauthenticated and
-unbounded peer table, an unpriced mempool, and plaintext key files.
+does nothing. Fork choice uses accumulated work and rejects longer but lighter chains.
+The three largest remaining gaps are an unauthenticated peer layer without diversity or
+eviction policies, an unbounded and unpriced mempool, and plaintext key files.
 
 [`SECURITY.md`](SECURITY.md) is the disclosure policy.
 
