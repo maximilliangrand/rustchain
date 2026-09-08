@@ -338,8 +338,9 @@ nothing.
 | 10 | Plaintext keys, non-atomic writes | **Open** |
 | 10 | Private key leaked through `Debug` | Addressed |
 
-The three that would have to close before this were anything but educational, in order: a peer
-layer with identity and bounds (§4), a bounded and priced mempool (§5), and encrypted key
-storage (§10). Work-based fork choice, the first item on the old list, is now done.
+The three largest remaining gaps, in order: a peer layer with identity, diversity and eviction
+policies (§4), a bounded and priced mempool (§5), and encrypted key storage (§10). The peer
+table already has a size cap, and fork choice already requires strictly greater accumulated
+work (§2). Closing these gaps alone would not make this a production-ready blockchain.
 
 Reporting: see [SECURITY.md](../SECURITY.md).
